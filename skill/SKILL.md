@@ -14,13 +14,18 @@ allowed-tools: Read, Bash, Write
 
 # Baton — session handoff
 
-The receiver may be a **contextless Haiku-class model**. Everything below exists
-because of one measured fact: for weak models, prompt-level accuracy falls off as
-`per-instruction-accuracy ^ (number of instructions)`. Frontier models degrade
-linearly with instruction density; Haiku-class models degrade **exponentially**.
+The receiver is a **fresh mind with no shared history** — possibly a different model,
+possibly a different kind of intelligence entirely. It has the repo and this document,
+and nothing else.
 
-So the job is not "write down what happened." It is **"minimize the number of
-instructions the receiver must hold at once, and make every one of them verifiable."**
+So the job is not "write down what happened." It is **"make every instruction
+verifiable, and make the reasoning behind them learnable."** A receiver that can check
+each step against reality does not need to trust you; a receiver that understands why
+the task is the task can tell when the plan has stopped making sense.
+
+The design once assumed weak receivers decay exponentially in instruction count, and
+optimised for terseness. This system's own eval did not reproduce that, so brevity is no
+longer the goal — verifiability and explanation are.
 
 ---
 
@@ -71,8 +76,13 @@ If the card exists but you violated or discovered a standing rule this session, 
 so and offer `card` (below). Do not silently edit it.
 
 **STEP 3 — Write `<root>/.baton/BATON.md`** from `templates/baton.md`, following the
-schema in `BATON_SPEC.md`. Budget: **2,500 tokens** (`--tier haiku`, the default) or
-**5,000** (`--tier frontier`, which additionally permits §10).
+schema in `BATON_SPEC.md`. Budget: **5,000 tokens** (`--tier teaching`, the default,
+which includes §10 Decisions + Why) or **2,500** (`--tier brief`, §10 omitted, for a
+task that genuinely is small).
+
+Tiers are detail budgets, **not** model classes — a tier never picks a model. Write so
+that any receiver, any model, any intelligence with no shared history, can both execute
+the task and understand why it is the task.
 
 The eight rules that make it work:
 

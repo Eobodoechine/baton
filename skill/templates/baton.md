@@ -1,6 +1,6 @@
 # BATON — {{TOPIC}} (cut {{YYYY-MM-DD HH:MM}})
 Chain: {{N}} / Parent: {{PARENT_PATH_OR_none}}
-Receiver tier: {{haiku|frontier}}
+Detail tier: {{teaching|brief}}   # a DETAIL budget, not a model choice
 Card: .baton/PROJECT_CARD.md @ {{CARD_HASH8}}
 Trust rule: This file is a summary. Anything tagged [S] is summary-derived —
 verify it against the repo before acting on it.
@@ -48,8 +48,9 @@ from git — keep this short.}}
 - {{non-obvious trap that would cost the receiver a cycle}}
 
 ## 10. DECISIONS + WHY
-{{FRONTIER TIER ONLY. Omit entirely at haiku tier. First section trimmed under
-budget pressure.}}
+{{TEACHING TIER (the default). Why this task, why this approach, what was ruled out
+and on what evidence. Write it so a reader with no shared history learns the
+reasoning, not just the moves. Omit only at brief tier.}}
 
 ## 11. DONE MEANS
 {{command}} exits 0 with "{{expected}}", and {{other objective condition}}.

@@ -333,15 +333,30 @@ trust check and the child's `cd`.
 **Graceful degradation:** with zero hooks wired the skill is fully functional by hand.
 Hooks add measurement, nagging, gating, and auto-pickup — nothing else.
 
-## 7. Receiver tiers
+## 7. Detail tiers
 
 One template. `--tier` is a budget knob, not a template switch — two templates would
 drift apart, and include/exclude flags multiply the *cutter's* own instruction load.
 
+**Tiers are detail budgets, not model classes.** A tier never selects a model; the relay
+inherits whatever model is configured (§6). The former names `haiku`/`frontier` welded
+those two ideas together — cutting a "haiku baton" silently also meant *spawning* a
+haiku — and survive only as aliases.
+
 | Tier | Cap | Effect |
 |---|---|---|
-| `haiku` (default) | 2,500 tok | Trim order enforced; <=10 steps; §10 omitted |
-| `frontier` | 5,000 tok | §10 (Decisions + Why) permitted; fuller §7 |
+| `teaching` (default, alias `frontier`) | 5,000 tok | §10 Decisions + Why included; fuller §7 |
+| `brief` (alias `haiku`) | 2,500 tok | Trim order enforced; <=10 steps; §10 omitted |
+
+**The default is `teaching`.** A baton should let any receiver — any model, any
+intelligence, with no shared history — both *execute* the task and *understand why it is
+the task*. Write §4 and §10 so a reader learns the reasoning, not just the moves.
+
+The old default optimised for minimum instruction count against weak receivers, on the
+premise of exponential instruction-density decay in Haiku-class models. **This system's
+own eval did not reproduce that** (0/3 substantive delta, `claude-haiku-4-5`). With the
+premise unsupported, terseness buys little, while a receiver that acts without
+understanding is the expensive failure. Choose `brief` only when the task genuinely is.
 
 The `Receiver tier:` header records which was used.
 

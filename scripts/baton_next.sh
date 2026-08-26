@@ -28,19 +28,25 @@ if [ ! -f "$baton" ]; then
   exit 1
 fi
 
-tier=$(grep -m1 '^Receiver tier:' "$baton" 2>/dev/null | awk '{print $3}' || true)
-case "${tier:-haiku}" in
-  frontier) model="opus" ;;
-  *)        model="claude-haiku-4-5" ;;
-esac
+# `Receiver tier:` governs how the baton is WRITTEN (detail budget, whether section 10
+# is permitted). It deliberately does NOT pick a model. Two reasons: a relay must never
+# silently downgrade the work, and hardcoding model names here would put model policy in
+# a shell script instead of a registry.
+#
+# Default: pass no --model at all, so the successor inherits the configured model.
+# Pin one only if you have a reason: BATON_RELAY_MODEL=<id>
+tier=$(grep -m1 -E '^(Detail|Receiver) tier:' "$baton" 2>/dev/null | awk '{print $3}' || true)
+model="${BATON_RELAY_MODEL:-}"
+model_note=${model:+ --model $model}
 
 prompt="Read $baton and execute it. Follow it exactly; do not expand scope."
 
 case "${1:-}" in
-  --exec)     exec claude --model "$model" "$prompt" ;;
-  --headless) echo "claude -p --model $model \"$prompt\"" ;;
+  --exec)     if [ -n "$model" ]; then exec claude --model "$model" "$prompt"
+              else exec claude "$prompt"; fi ;;
+  --headless) echo "claude -p$model_note \"$prompt\""; exit 0 ;;
   --spawn)    ;;  # handled below
-  *)          echo "claude --model $model \"$prompt\""; exit 0 ;;
+  *)          echo "claude$model_note \"$prompt\""; exit 0 ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -49,7 +55,7 @@ esac
 
 command -v tmux >/dev/null 2>&1 || {
   echo "baton relay: tmux not found — falling back to printing the command" >&2
-  echo "claude --model $model \"$prompt\""
+  echo "claude$model_note \"$prompt\""
   exit 4
 }
 
@@ -63,7 +69,7 @@ next=$((gen + 1))
 if [ "$next" -gt "$max" ]; then
   echo "baton relay: chain depth cap reached (generation $next > BATON_RELAY_MAX_GEN=$max)." >&2
   echo "baton relay: NOT spawning. Start it by hand if you want to continue:" >&2
-  echo "claude --model $model \"$prompt\""
+  echo "claude$model_note \"$prompt\""
   exit 3
 fi
 
@@ -112,7 +118,8 @@ spawn generation $((next + 1)); at $max the chain stops and waits for a human.)"
   printf 'export BATON_RELAY_GEN=%s\n' "$next"
   printf 'export BATON_RELAY_MAX_GEN=%s\n' "$max"
   printf 'cd %q || exit 1\n' "$root_real"
-  printf 'exec claude --model %q' "$model"
+  printf 'exec claude'
+  [ -n "$model" ] && printf ' --model %q' "$model"
   [ -n "${BATON_RELAY_PERMISSION_MODE:-}" ] && printf ' --permission-mode %q' "$BATON_RELAY_PERMISSION_MODE"
   printf ' %q\n' "$child_prompt"
 } > "$launcher"
@@ -165,7 +172,8 @@ baton relay: successor started.
 
   session    $session
   generation $next of $max
-  model      $model
+  model      ${model:-inherited from your Claude Code config}
+  written for ${tier:-haiku}-tier detail
   cwd        $root
   baton      $baton
   log        $log

@@ -4,7 +4,7 @@
 Checks only what can be checked mechanically. It cannot tell you whether the baton is
 TRUE — that is what the receiver eval is for. Usage:
 
-    lint_baton.py path/to/BATON.md [--tier haiku|frontier]
+    lint_baton.py path/to/BATON.md [--tier brief|teaching]
 
 Exit 0 = conforms. Exit 1 = violations, printed one per line.
 """
@@ -23,7 +23,12 @@ MANDATORY = [
     "## 11. DONE MEANS",
 ]
 PLACEHOLDER = re.compile(r"\{\{[A-Z_|a-z-]+\}\}|<fill in>|TODO:|TBD\b")
-CAPS = {"haiku": 2500, "frontier": 5000}
+# Tiers are DETAIL budgets, not model classes. The old model-named values are kept as
+# aliases so existing batons keep linting, but a tier never selects a model -- the relay
+# inherits the configured one (scripts/baton_next.sh).
+CANON = {"brief": "brief", "teaching": "teaching",
+         "haiku": "brief", "frontier": "teaching"}
+CAPS = {"brief": 2500, "teaching": 5000}
 
 
 def section(body, header):
@@ -55,8 +60,8 @@ def check(path, tier):
                    % (est, cap, tier))
 
     steps = re.findall(r"^\s*(\d+)\.\s", section(body, "## 3. THE TASK"), re.M)
-    if tier == "haiku" and len(steps) > 10:
-        bad.append("section 3 has %d numbered steps; haiku tier allows 10 "
+    if tier == "brief" and len(steps) > 10:
+        bad.append("section 3 has %d numbered steps; brief tier allows 10 "
                    "(cut a smaller baton instead)" % len(steps))
     if not steps:
         bad.append("section 3 has no numbered steps")
@@ -92,8 +97,8 @@ def check(path, tier):
         bad.append("contains the pass-verdict shape loop_stop_guard.py matches on; "
                    "write 'Verifier result — green' instead")
 
-    if tier == "haiku" and "## 10. DECISIONS" in body:
-        bad.append("section 10 is frontier-tier only")
+    if tier == "brief" and "## 10. DECISIONS" in body:
+        bad.append("section 10 is teaching-tier only")
 
     return bad
 
@@ -101,7 +106,7 @@ def check(path, tier):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("baton")
-    ap.add_argument("--tier", choices=sorted(CAPS), default=None)
+    ap.add_argument("--tier", choices=sorted(CANON), default=None)
     a = ap.parse_args()
 
     if not os.path.exists(a.baton):
@@ -111,9 +116,11 @@ def main():
     tier = a.tier
     if tier is None:
         head = open(a.baton, encoding="utf-8", errors="replace").read(2000)
-        m = re.search(r"^Receiver tier:\s*(\w+)", head, re.M)
-        tier = m.group(1) if m and m.group(1) in CAPS else "haiku"
+        # "Detail tier:" is current; "Receiver tier:" is the pre-rename header.
+        m = re.search(r"^(?:Detail|Receiver) tier:\s*(\w+)", head, re.M)
+        tier = m.group(1) if m and m.group(1) in CANON else "teaching"
 
+    tier = CANON.get(tier, "teaching")
     bad = check(a.baton, tier)
     for b in bad:
         print("FAIL: %s" % b)
