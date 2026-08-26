@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-.baton/relay/
+# Session working state: batons quote the user verbatim and pin local paths.
+# Kept local on purpose; this repo is public.
+.baton/
 .DS_Store
