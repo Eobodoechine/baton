@@ -7,6 +7,31 @@ stopped — and, optionally, start that session for you automatically.
 Built for the case where a long session is about to hit its context ceiling and the
 work isn't done.
 
+## Quick start
+
+```sh
+git clone https://github.com/Eobodoechine/baton.git
+cd baton && ./install.sh
+```
+
+`install.sh` symlinks `skill/` into `~/.claude/skills/baton` and prints the hook config
+for you to paste. It refuses to clobber an existing install, and it never writes to your
+`settings.json` itself, because a bad hook registration wedges tool calls and that is not
+a thing to do to someone's config unasked.
+
+Hooks are entirely optional. With zero hooks wired the skill works fully by hand.
+
+Then, in any project, from a Claude Code session that is running long:
+
+```
+/baton card      once per project, describe how work is done here
+/baton cut       write the handoff and start the successor session
+/baton pickup    from the fresh session, resume exactly where you stopped
+/baton status    is a baton pending, how old, does the card hash still match
+```
+
+Run `/baton card` first. Everything else works better once the stable layer exists.
+
 ## The two layers
 
 Standing project rules do not ride in the per-task document. They live one layer up:
@@ -31,6 +56,33 @@ live-reads it and never restates it.
 /baton card      update the stable layer (process changed)
 /baton status    is a baton pending, how old, does the card hash still match
 ```
+
+## Making it yours
+
+There is no config file, and that is deliberate. The thing you customise is the **stable
+layer**, `.baton/PROJECT_CARD.md`, one per project. It is the executable companion to
+your `CLAUDE.md`: literal commands with literal expected output, not narrative.
+
+`/baton card` scaffolds it from [`skill/templates/project_card.md`](skill/templates/project_card.md).
+Fill in four things and the rest of the system gets sharper:
+
+| Section | What to put | Why it earns its place |
+|---|---|---|
+| **Verify commands** | The exact command and its exact expected output | A receiver that can check its own work does not have to trust you. Name the literal interpreter if a bare one resolves wrong; that has cost real cycles. |
+| **Paths** | Which directory holds what | Stops a fresh session guessing at your layout |
+| **Standing rules** | How work is done here, framed positively | These are the rules that outlive any one task |
+| **Always-true gotchas** | Traps true in this project regardless of task | The things you would say out loud to a new teammate on day one |
+
+Keep task detail out of the card. Anything true only of the work currently in flight
+belongs in `.baton/BATON.md`, which is rewritten on every cut. The split is the whole
+design: the card changes when your *process* changes, the baton changes every handoff.
+
+The baton pins the card by content hash, so if the card moved underneath a pending
+baton, the receiver fails closed rather than working off stale instructions. That is
+also the failure mode to expect first if a pickup refuses.
+
+Rewrite the template's wording freely. It is a starting shape, not a schema, and nothing
+parses those headings.
 
 ## The relay (auto-spawn)
 
@@ -82,16 +134,12 @@ So claim only what is shown:
 It is **not** established that the baton format improves weak-model comprehension. That
 was tested fairly and the result was null. The eval is in this repo so you can rerun it.
 
-## Install
+## Install detail
 
-```sh
-./install.sh          # symlinks skill/ into ~/.claude/skills/baton and prints hook config
-```
-
-Hooks are optional. With zero hooks wired the skill is fully functional by hand; hooks
-add context metering, a due-baton nag, a Stop gate, and auto-pickup announcements.
-Register each mode existence-guarded — see [`SPEC.md`](SPEC.md) §6 for why a bare
-registration wedges a tool call when the file is absent.
+`./install.sh` is covered in Quick start above. Hooks add context metering, a due-baton
+nag, a Stop gate, and auto-pickup announcements. Register each mode existence-guarded,
+see [`SPEC.md`](SPEC.md) §6 for why a bare registration wedges a tool call when the file
+is absent.
 
 ## Layout
 
