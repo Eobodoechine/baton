@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import shlex
 import subprocess
 import sys
 import time
@@ -102,11 +101,17 @@ def test_claude_headless_prints_a_shell_escaped_command(tmp_path):
     assert "BATON.md" in result.stdout
 
 
-def test_codex_headless_uses_official_exec_surface(tmp_path):
+def test_codex_headless_uses_official_exec_surface(tmp_path, monkeypatch):
     root = project(tmp_path)
+    monkeypatch.delenv("BATON_RELAY_SANDBOX", raising=False)
+    monkeypatch.delenv("BATON_RELAY_APPROVAL_POLICY", raising=False)
+    baton = root / ".baton" / "BATON.md"
+    prompt = relay.relay_prompt(str(baton), 1, 5)
+    adapter = relay.build_adapter("codex", str(root), str(baton), prompt, "")
     result = run(root, "--headless", "--provider", "codex")
     assert result.returncode == 0, result.stderr
-    argv = shlex.split(result.stdout.strip())
+    argv = adapter["headless"]
+    assert result.stdout.strip() == relay.format_command(argv)
     assert argv[0] == "codex"
     assert "exec" in argv
     assert argv[argv.index("-C") + 1] == str(root)
@@ -115,13 +120,18 @@ def test_codex_headless_uses_official_exec_surface(tmp_path):
     assert "BATON.md" in argv[-1]
 
 
-def test_codex_0146_global_approval_option_precedes_exec(tmp_path):
+def test_codex_0146_global_approval_option_precedes_exec(tmp_path, monkeypatch):
     root = project(tmp_path)
+    monkeypatch.setenv("BATON_RELAY_APPROVAL_POLICY", "never")
+    baton = root / ".baton" / "BATON.md"
+    prompt = relay.relay_prompt(str(baton), 1, 5)
+    adapter = relay.build_adapter("codex", str(root), str(baton), prompt, "")
     result = run(root, "--headless", "--provider", "codex", env={
         "BATON_RELAY_APPROVAL_POLICY": "never",
     })
     assert result.returncode == 0, result.stderr
-    argv = shlex.split(result.stdout.strip())
+    argv = adapter["headless"]
+    assert result.stdout.strip() == relay.format_command(argv)
     approval = argv.index("--ask-for-approval")
     subcommand = argv.index("exec")
     assert argv[approval + 1] == "never"
@@ -292,15 +302,21 @@ def test_auto_provider_refuses_to_guess_when_both_are_installed(tmp_path):
     assert "--provider codex" in result.stderr
 
 
-def test_custom_provider_preserves_json_argv_as_literals_when_printed(tmp_path):
+def test_custom_provider_preserves_json_argv_as_literals_when_printed(
+        tmp_path, monkeypatch):
     root = project(tmp_path)
     payload = "literal; value with $(syntax)"
+    raw = json.dumps(["my agent", "--repo", "{root}", payload, "{prompt}"])
+    monkeypatch.setenv("BATON_RELAY_COMMAND_JSON", raw)
+    baton = root / ".baton" / "BATON.md"
+    prompt = relay.relay_prompt(str(baton), 1, 5)
+    adapter = relay.build_adapter("custom", str(root), str(baton), prompt, "")
     result = run(root, "--print", "--provider", "custom", env={
-        "BATON_RELAY_COMMAND_JSON": json.dumps(
-            ["my agent", "--repo", "{root}", payload, "{prompt}"]),
+        "BATON_RELAY_COMMAND_JSON": raw,
     })
     assert result.returncode == 0, result.stderr
-    argv = shlex.split(result.stdout.strip())
+    argv = adapter["interactive"]
+    assert result.stdout.strip() == relay.format_command(argv)
     assert argv[:4] == ["my agent", "--repo", str(root), payload]
     assert argv[4].startswith("Pick up the baton")
 
