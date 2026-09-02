@@ -58,6 +58,16 @@ def project(tmp_path):
 def run(root, *args, env=None):
     merged = dict(os.environ, HOME=str(root / "home"))
     (root / "home").mkdir(exist_ok=True)
+    # A real successor inherits the relay controls that launched it. Tests must
+    # opt into those controls explicitly; otherwise a parent session can change
+    # the behavior being exercised and make the suite host-dependent.
+    for key in (
+        "BATON_RELAY_GEN",
+        "BATON_RELAY_MAX_GEN",
+        "BATON_RELAY_MODEL",
+        "BATON_RELAY_PERMISSION_MODE",
+    ):
+        merged.pop(key, None)
     merged.update(env or {})
     return subprocess.run(
         [sys.executable, str(RELAY), *args], cwd=root, env=merged,
@@ -133,6 +143,18 @@ def test_spawn_without_tmux_refuses_an_invisible_wait(tmp_path):
     assert result.returncode == 4
     assert "refusing to detach" in result.stderr
     assert "claude" in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="PATH isolation fixture is POSIX-only")
+def test_relay_tests_ignore_parent_session_controls(tmp_path, monkeypatch):
+    monkeypatch.setenv("BATON_RELAY_GEN", "4")
+    monkeypatch.setenv("BATON_RELAY_MAX_GEN", "1")
+    monkeypatch.setenv("BATON_RELAY_MODEL", "parent-model")
+    monkeypatch.setenv("BATON_RELAY_PERMISSION_MODE", "auto")
+    root = project(tmp_path)
+    result = run(root, "--spawn", env={"PATH": "/usr/bin:/bin"})
+    assert result.returncode == 4
+    assert "refusing to detach" in result.stderr
 
 
 @pytest.mark.skipif(os.name == "nt", reason="fake executable fixture is POSIX-only")
