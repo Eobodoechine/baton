@@ -1,0 +1,187 @@
+name: native-windows-receiver-cacc23a
+
+on:
+  push:
+    branches:
+      - codex/native-windows-receiver-cacc23a
+
+permissions:
+  contents: read
+
+jobs:
+  native-windows-receiver:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cacc23a5354121acdc45029e8f4d27f67225dfb4
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install test dependency
+        run: python -m pip install pytest
+      - name: Create native Windows receiver fixture
+        shell: pwsh
+        run: |
+          $repo = (Get-Location).Path
+          New-Item -ItemType Directory -Force -Path .baton | Out-Null
+
+          $card = @'
+          # PROJECT CARD — native Windows receiver fixture
+
+          card_version: 1
+          updated: 2026-09-01
+
+          ## Verify commands
+          - `py -3 -c "import platform; print(platform.system())"` prints `Windows`.
+
+          ## Paths
+          - `scripts/baton_next.py` is the receiver-neutral relay core.
+          - `.baton/` contains ignored fixture state and receipts.
+
+          ## Standing rules
+          - Keep tracked source byte-identical to cacc23a.
+          - Write only inside the ignored `.baton/` directory and runner temp.
+
+          ## Always-true gotchas
+          - Native Windows has no tmux, so a custom receiver requires an explicit headless argv.
+          '@
+          Set-Content -LiteralPath .baton/PROJECT_CARD.md -Value $card -Encoding utf8NoBOM
+          $cardHash = (Get-FileHash -Algorithm SHA256 .baton/PROJECT_CARD.md).Hash.Substring(0, 8).ToLowerInvariant()
+
+          $baton = @"
+          # BATON — native Windows detached receiver fixture
+          Detail tier: brief
+          Repo: $repo
+          Card: .baton/PROJECT_CARD.md @ $cardHash
+          Trust rule: This file is a summary. Anything tagged [S] is summary-derived — verify it against the repository before acting on it.
+
+          ## 1. DO THIS NOW
+          Run: py -3 -c "import platform; print(platform.system())"
+          Expected: exactly "Windows" and exit 0.
+
+          ## 2. WHERE YOU ARE — invariant check
+          Run: git -C "$repo" log --oneline -1
+          Expected: starts with cacc23a
+          Run: py -3 -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path(r'$repo/.baton/PROJECT_CARD.md').read_bytes()).hexdigest()[:8])"
+          Expected: $cardHash
+          If either does not match: STOP. Report the mismatch and do nothing else.
+
+          ## 3. THE TASK
+          1. Run the section 1 command exactly.
+             Verify: py -3 -c "import platform; print(platform.system())"
+             Expected: exactly `Windows` and exit 0.
+          2. Record the detached custom receiver result in `.baton/WINDOWS_RECEIVER_cacc23a.txt`.
+             Verify: Get-Content .baton/WINDOWS_RECEIVER_cacc23a.txt
+             Expected: contains `WINDOWS RECEIVER COMPLETE` and exit 0.
+
+          ## 4. DO NOT RETRY
+          - Stop on any invariant or command failure.
+          - Write only the ignored Windows receipt.
+          - Do not edit tracked source or publish from the receiver.
+
+          ## 5. USER'S WORDS
+          "Run A native Windows receiver session and fresh Claude/custom-model sessions at the final commit"
+
+          ## 6. RULES THAT BIND THIS TASK
+          - Keep tracked source byte-identical to `cacc23a`.
+          - Use Baton's detached headless custom adapter.
+          - Treat this non-production Windows fixture separately from real model sessions.
+
+          ## 7. STATE
+          This fixture is checked out at the final public commit `cacc23a`. [S]
+
+          ## 8. FILES
+          - $repo/scripts/baton_next.py — relay under test.
+          - $repo/.baton/WINDOWS_RECEIVER_cacc23a.txt — ignored receiver receipt.
+
+          ## 9. GOTCHAS
+          - GitHub-hosted Windows has no tmux; the relay must select `detached-headless`.
+
+          ## 11. DONE MEANS
+          The receiver runs natively on Windows, validates `cacc23a` and the card hash before writing, and emits the ignored completion receipt.
+          REPEAT — DO THIS NOW: py -3 -c "import platform; print(platform.system())"
+          "@
+          Set-Content -LiteralPath .baton/BATON.md -Value $baton -Encoding utf8NoBOM
+          python evals/lint_baton.py .baton/BATON.md --repo-root $repo
+
+          $receiverPath = Join-Path $env:RUNNER_TEMP 'baton_native_windows_receiver.py'
+          $receiver = @'
+          import hashlib
+          import pathlib
+          import platform
+          import re
+          import subprocess
+          import sys
+
+          prompt = sys.argv[1]
+          root = pathlib.Path.cwd()
+          match = re.search(r"Read (.+?) and execute it\.", prompt)
+          if not match:
+              raise SystemExit("receiver prompt did not identify the baton")
+          baton = pathlib.Path(match.group(1))
+          if not baton.is_file() or baton.parent != root / ".baton":
+              raise SystemExit("receiver baton path was not contained in the checkout")
+
+          head = subprocess.check_output(
+              ["git", "-C", str(root), "rev-parse", "--short", "HEAD"], text=True
+          ).strip()
+          if head != "cacc23a":
+              raise SystemExit("invariant mismatch: head=" + head)
+
+          card = root / ".baton" / "PROJECT_CARD.md"
+          card_hash = hashlib.sha256(card.read_bytes()).hexdigest()[:8]
+          expected = re.search(r"^Card: .* @ ([0-9a-f]{8})$", baton.read_text(encoding="utf-8"), re.M)
+          if not expected or card_hash != expected.group(1):
+              raise SystemExit("invariant mismatch: card=" + card_hash)
+
+          system = platform.system()
+          if system != "Windows":
+              raise SystemExit("platform mismatch: " + system)
+
+          receipt = root / ".baton" / "WINDOWS_RECEIVER_cacc23a.txt"
+          receipt.write_text(
+              "provider=custom\nbackend=detached-headless\nplatform=" + system +
+              "\nhead=" + head + "\ncard=" + card_hash +
+              "\nWINDOWS RECEIVER COMPLETE\n",
+              encoding="utf-8",
+          )
+          '@
+          Set-Content -LiteralPath $receiverPath -Value $receiver -Encoding utf8NoBOM
+          "RECEIVER_PATH=$receiverPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Run native Windows detached receiver
+        shell: pwsh
+        run: |
+          $receiverArgv = @('python', $env:RECEIVER_PATH, '{prompt}') | ConvertTo-Json -Compress
+          $env:BATON_RELAY_COMMAND_JSON = $receiverArgv
+          $env:BATON_RELAY_HEADLESS_COMMAND_JSON = $receiverArgv
+          python scripts/baton_next.py --spawn --provider custom
+          if ($LASTEXITCODE -ne 0) { throw "relay exited $LASTEXITCODE" }
+
+          $receipt = Join-Path (Get-Location).Path '.baton/WINDOWS_RECEIVER_cacc23a.txt'
+          for ($i = 0; $i -lt 60 -and -not (Test-Path -LiteralPath $receipt); $i++) {
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not (Test-Path -LiteralPath $receipt)) { throw 'receiver receipt was not created' }
+
+          $receiptText = Get-Content -Raw -LiteralPath $receipt
+          if ($receiptText -notmatch 'WINDOWS RECEIVER COMPLETE') { throw 'completion marker missing' }
+          if ($receiptText -notmatch 'platform=Windows') { throw 'native Windows marker missing' }
+          if ($receiptText -notmatch 'head=cacc23a') { throw 'final commit marker missing' }
+
+          $relayLog = Get-Content -Raw -LiteralPath .baton/batons.log
+          if ($relayLog -notmatch 'backend=detached-headless.*provider=custom') {
+            throw 'detached custom relay ledger entry missing'
+          }
+
+          $dirty = git status --porcelain=v1 --untracked-files=all
+          if ($dirty) { throw "tracked checkout became dirty: $dirty" }
+          Get-Content -LiteralPath $receipt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-windows-receiver-cacc23a
+          path: |
+            .baton/WINDOWS_RECEIVER_cacc23a.txt
+            .baton/batons.log
