@@ -6,8 +6,10 @@ updated: {{YYYY-MM-DD}}
 The **stable** layer: how work is done here, regardless of what task is in flight.
 Changes only when the process changes. The volatile layer is `.baton/BATON.md`.
 
-This card is the *executable* companion to the project's `CLAUDE.md` — literal
-commands with literal expected output, not narrative. Do not restate `CLAUDE.md`.
+This card is the *executable* companion to the repository's applicable agent
+instructions (for example `AGENTS.md`, `CLAUDE.md`, or another designated file) —
+literal commands with literal expected output, not narrative. Do not restate those
+instruction files.
 
 ## Purpose
 

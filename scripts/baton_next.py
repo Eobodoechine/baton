@@ -3,9 +3,9 @@
 
 The validation and command-building path is standard-library Python. Built-in
 adapters support Codex and Claude Code. A JSON argv adapter supports other agents
-without routing through a shell. tmux is optional: it provides an attachable
-interactive receiver, while provider-specific non-interactive commands provide the
-safe detached fallback.
+without routing receiver arguments through a shell. tmux is optional: it provides an
+attachable interactive receiver, while provider-specific non-interactive commands
+provide the safe detached fallback.
 """
 
 import argparse
@@ -175,7 +175,9 @@ def build_adapter(provider, root, baton, prompt, model):
             "permission_summary": permission or "interactive approvals",
         }
     if provider == "codex":
-        sandbox = os.environ.get("BATON_RELAY_SANDBOX", "")
+        # Baton handoffs default to an explicit read-only sandbox instead of
+        # inheriting a potentially broader user configuration.
+        sandbox = os.environ.get("BATON_RELAY_SANDBOX", "") or "read-only"
         approval = os.environ.get("BATON_RELAY_APPROVAL_POLICY", "")
         if sandbox and sandbox not in CODEX_SANDBOXES:
             raise ValueError("BATON_RELAY_SANDBOX must be one of: %s" %
@@ -186,15 +188,17 @@ def build_adapter(provider, root, baton, prompt, model):
         common = ["-C", root]
         if model:
             common += ["--model", model]
-        if sandbox:
-            common += ["--sandbox", sandbox]
+        common += ["--sandbox", sandbox]
         if approval:
             common += ["--ask-for-approval", approval]
         interactive = ["codex"] + common + [prompt]
-        headless = ["codex", "exec"] + common + [prompt]
-        wait_warning = None
-        if approval != "never":
-            wait_warning = "! CODEX INTERACTIVE — attach for login or approval prompts."
+        # In Codex CLI 0.146, approval policy is a top-level option, not an `exec`
+        # option. Keep all shared options before the subcommand so the generated
+        # unattended command is accepted by the real parser.
+        headless = ["codex"] + common + ["exec", prompt]
+        wait_warning = ("! CODEX INTERACTIVE — attach for login prompts."
+                        if approval == "never" else
+                        "! CODEX INTERACTIVE — attach for login or approval prompts.")
         return {
             "provider": provider,
             "interactive": interactive,
@@ -203,7 +207,7 @@ def build_adapter(provider, root, baton, prompt, model):
             "model": model or "inherited from Codex config",
             "wait_warning": wait_warning,
             "permission_summary": "sandbox=%s, approvals=%s" % (
-                sandbox or "read-only default", approval or "Codex default"),
+                sandbox, approval or "Codex default"),
         }
     if provider == "custom":
         interactive_raw = _json_argv("BATON_RELAY_COMMAND_JSON", required=True)
@@ -262,7 +266,7 @@ def _tmux_spawn(tmux, root, session, command, log):
         raise FileExistsError("tmux session '%s' already exists" % session)
     subprocess.run(
         [tmux, "new-session", "-d", "-s", session, "-c", root,
-         format_command(command, windows=False)], check=True,
+         *command], check=True,
     )
     subprocess.run(
         [tmux, "pipe-pane", "-o", "-t", session,

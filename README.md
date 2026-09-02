@@ -31,19 +31,21 @@ to clobber an existing install and never edits agent settings. When Claude Code 
 of the targets, it also prints optional hook JSON for you to merge; those hooks are a
 Claude adapter, not a requirement for Baton itself.
 
+Codex mode does not require a Claude installation or account and does not invoke the
+Claude adapter.
+
 Hooks are entirely optional. With zero hooks wired the skill works fully by hand.
 
-Then, in any project, ask the installed skill to run one of these actions. Codex users
-can write `$baton cut`; Claude Code users can write `/baton cut`:
+Then, in any project, ask the installed skill to run one of these actions:
 
-```
-/baton card      once per project, describe how work is done here
-/baton cut       write the handoff and start the successor session
-/baton pickup    from the fresh session, resume exactly where you stopped
-/baton status    is a baton pending, how old, does the card hash still match
-```
+| Action | Codex | Claude Code | Purpose |
+|---|---|---|---|
+| card | `$baton card` | `/baton card` | Once per project, describe how work is done here |
+| cut | `$baton cut` | `/baton cut` | Write the handoff and start the successor session |
+| pickup | `$baton pickup` | `/baton pickup` | Resume from the fresh session |
+| status | `$baton status` | `/baton status` | Check pending state, age, and card hash |
 
-Run `/baton card` first. Everything else works better once the stable layer exists.
+Run the `card` action first. Everything else works better once the stable layer exists.
 
 ## The two layers
 
@@ -101,8 +103,10 @@ examples.
 ## The relay (auto-spawn)
 
 The relay is receiver-neutral. Built-in adapters support Codex and Claude Code, and a
-shell-free JSON argv adapter supports other agents. Choose explicitly when more than
-one supported receiver is installed:
+shell-free JSON argv adapter supports other agents. Detached launches pass argv
+directly to the process API; attachable tmux launches pass the command and each
+argument separately, using tmux's direct-execution form rather than `sh -c`. Choose
+explicitly when more than one supported receiver is installed:
 
 ```sh
 python scripts/baton_next.py --spawn --provider codex
@@ -133,15 +137,17 @@ and prints the manual command.
 Without tmux, behavior depends on the receiver's supported non-interactive surface:
 
 - Codex uses the official non-interactive `codex exec` command. Its default sandbox is
-  read-only. Set `BATON_RELAY_SANDBOX=workspace-write` only when the baton must edit,
-  and optionally set `BATON_RELAY_APPROVAL_POLICY=never` for a fully unattended run.
+  set explicitly to `read-only` by Baton so a broader user configuration cannot leak
+  into the successor. Set `BATON_RELAY_SANDBOX=workspace-write` only when the baton
+  must edit, and optionally set `BATON_RELAY_APPROVAL_POLICY=never` for a fully
+  unattended run.
 - Claude Code starts a detached headless receiver only when
   `BATON_RELAY_PERMISSION_MODE` is explicitly set. Otherwise it prints the manual
   command and exits 4 rather than hiding a waiting approval prompt.
 - A custom receiver needs both `BATON_RELAY_COMMAND_JSON` and, for detached use,
   `BATON_RELAY_HEADLESS_COMMAND_JSON`. Each is a JSON array of argv strings; Baton does
-  not run it through a shell. Exact `{root}`, `{baton}`, and `{prompt}` tokens are
-  replaced. If `{prompt}` is absent, the prompt is appended.
+  not run the receiver command through a shell. Exact `{root}`, `{baton}`, and
+  `{prompt}` tokens are replaced. If `{prompt}` is absent, the prompt is appended.
 
 `BATON_RELAY_MODEL` is an optional model override for either built-in receiver. The
 baton's `teaching` or `brief` tier still controls document detail only; it never picks a

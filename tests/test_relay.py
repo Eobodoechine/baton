@@ -5,8 +5,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -104,9 +106,34 @@ def test_codex_headless_uses_official_exec_surface(tmp_path):
     root = project(tmp_path)
     result = run(root, "--headless", "--provider", "codex")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.startswith("codex exec -C ")
-    assert str(root) in result.stdout
-    assert "BATON.md" in result.stdout
+    argv = shlex.split(result.stdout.strip())
+    assert argv[0] == "codex"
+    assert "exec" in argv
+    assert argv[argv.index("-C") + 1] == str(root)
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert argv.index("--sandbox") < argv.index("exec")
+    assert "BATON.md" in argv[-1]
+
+
+def test_codex_0146_global_approval_option_precedes_exec(tmp_path):
+    root = project(tmp_path)
+    result = run(root, "--headless", "--provider", "codex", env={
+        "BATON_RELAY_APPROVAL_POLICY": "never",
+    })
+    assert result.returncode == 0, result.stderr
+    argv = shlex.split(result.stdout.strip())
+    approval = argv.index("--ask-for-approval")
+    subcommand = argv.index("exec")
+    assert argv[approval + 1] == "never"
+    assert approval < subcommand
+
+
+def test_codex_never_approval_still_warns_about_login(tmp_path, monkeypatch):
+    root = project(tmp_path)
+    monkeypatch.setenv("BATON_RELAY_APPROVAL_POLICY", "never")
+    adapter = relay.build_adapter(
+        "codex", str(root), str(root / ".baton" / "BATON.md"), "prompt", "")
+    assert "login" in adapter["wait_warning"].lower()
 
 
 def test_command_formatting_supports_windows_and_posix():
@@ -265,15 +292,126 @@ def test_auto_provider_refuses_to_guess_when_both_are_installed(tmp_path):
     assert "--provider codex" in result.stderr
 
 
-def test_custom_provider_uses_json_argv_without_a_shell(tmp_path):
+def test_custom_provider_preserves_json_argv_as_literals_when_printed(tmp_path):
     root = project(tmp_path)
+    payload = "literal; value with $(syntax)"
     result = run(root, "--print", "--provider", "custom", env={
-        "BATON_RELAY_COMMAND_JSON": '["my agent", "--repo", "{root}", "{prompt}"]',
+        "BATON_RELAY_COMMAND_JSON": json.dumps(
+            ["my agent", "--repo", "{root}", payload, "{prompt}"]),
     })
     assert result.returncode == 0, result.stderr
-    assert "my agent" in result.stdout
-    assert str(root) in result.stdout
-    assert "Pick up the baton" in result.stdout
+    argv = shlex.split(result.stdout.strip())
+    assert argv[:4] == ["my agent", "--repo", str(root), payload]
+    assert argv[4].startswith("Pick up the baton")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake tmux fixture is POSIX-only")
+def test_tmux_receives_adversarial_custom_command_as_direct_argv(tmp_path):
+    root = project(tmp_path)
+    fake_bin = isolated_posix_bin(tmp_path)
+    calls = tmp_path / "tmux-calls.jsonl"
+    sentinel = tmp_path / "must-not-exist"
+    tmux = fake_bin / "tmux"
+    tmux.write_text(
+        "#!%s\n" % sys.executable +
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "with Path(os.environ['FAKE_TMUX_CALLS']).open('a') as fh:\n"
+        "    fh.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "raise SystemExit(1 if sys.argv[1:2] == ['has-session'] else 0)\n"
+    )
+    tmux.chmod(0o755)
+    receiver = fake_bin / "custom receiver"
+    receiver.write_text("#!/bin/sh\nexit 0\n")
+    receiver.chmod(0o755)
+    payload = "literal; touch %s; $(touch %s)" % (sentinel, sentinel)
+    result = run(root, "--spawn", "--provider", "custom", env={
+        "PATH": str(fake_bin),
+        "FAKE_TMUX_CALLS": str(calls),
+        "BATON_RELAY_COMMAND_JSON": json.dumps([
+            str(receiver), "--literal", payload, "{prompt}",
+        ]),
+    })
+    assert result.returncode == 0, result.stderr
+    recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+    launched = next(call for call in recorded if call[:1] == ["new-session"])
+    receiver_index = launched.index(str(receiver))
+    assert launched[receiver_index:receiver_index + 3] == [
+        str(receiver), "--literal", payload,
+    ]
+    assert launched[receiver_index + 3].startswith("Pick up the baton")
+    assert not sentinel.exists()
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or shutil.which("tmux") is None or
+    os.environ.get("BATON_LIVE_TMUX") != "1",
+    reason="set BATON_LIVE_TMUX=1 to exercise the installed tmux",
+)
+def test_live_tmux_executes_custom_argv_without_a_shell(tmp_path):
+    tmux = shutil.which("tmux")
+    capture_script = tmp_path / "capture-live-tmux.py"
+    captured = tmp_path / "captured-live-tmux.json"
+    sentinel = tmp_path / "must-not-exist"
+    capture_script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))\n"
+    )
+    payload = "literal; touch %s; $(touch %s)" % (sentinel, sentinel)
+    session = "baton-live-argv-%s" % os.getpid()
+    log = tmp_path / "tmux.log"
+    try:
+        relay._tmux_spawn(tmux, str(tmp_path), session, [
+            sys.executable, str(capture_script), str(captured), payload,
+        ], log)
+        for _ in range(100):
+            if captured.exists():
+                break
+            time.sleep(0.02)
+        assert captured.exists()
+        assert json.loads(captured.read_text()) == [payload]
+        assert not sentinel.exists()
+    finally:
+        subprocess.run(
+            [tmux, "kill-session", "-t", "=" + session],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="detached test uses a POSIX PATH fixture")
+def test_custom_detached_backend_passes_argv_directly(tmp_path):
+    root = project(tmp_path)
+    fake_bin = isolated_posix_bin(tmp_path)
+    capture_script = tmp_path / "capture-detached.py"
+    captured = tmp_path / "captured-detached.json"
+    sentinel = tmp_path / "must-not-exist"
+    capture_script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))\n"
+    )
+    payload = "literal; touch %s" % sentinel
+    headless = json.dumps([
+        sys.executable, str(capture_script), str(captured), "{baton}", payload,
+        "{prompt}",
+    ])
+    result = run(root, "--spawn", "--provider", "custom", env={
+        "PATH": str(fake_bin),
+        "BATON_RELAY_COMMAND_JSON": json.dumps([sys.executable, "{prompt}"]),
+        "BATON_RELAY_HEADLESS_COMMAND_JSON": headless,
+    })
+    assert result.returncode == 0, result.stderr
+    for _ in range(100):
+        if captured.exists():
+            break
+        time.sleep(0.02)
+    assert captured.exists()
+    argv = json.loads(captured.read_text())
+    assert argv[0] == str(root / ".baton" / "BATON.md")
+    assert argv[1] == payload
+    assert argv[2].startswith("Pick up the baton")
+    assert not sentinel.exists()
 
 
 def test_manifest_is_validated_provider_neutral_host_input(tmp_path):

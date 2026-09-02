@@ -67,9 +67,11 @@ If any fails, resolve it first. A baton cut over a dirty tree hands the receiver
 state it cannot verify.
 
 **STEP 2 — Ensure the card exists.** If `<root>/.baton/PROJECT_CARD.md` is missing,
-build it from `templates/project_card.md` using the project's `CLAUDE.md` and the
-commands you actually ran this session. Show it to the user and get confirmation
-before first use — a wrong card poisons every future baton.
+build it from `templates/project_card.md` using the applicable repository instruction
+files (for example `AGENTS.md`, `CLAUDE.md`, or another file the project designates)
+and the commands you actually ran this session. No vendor-specific instruction file
+is required. Show it to the user and get confirmation before first use — a wrong card
+poisons every future baton.
 
 If the card exists but you violated or discovered a standing rule this session, say
 so and offer `card` (below). Do not silently edit it.

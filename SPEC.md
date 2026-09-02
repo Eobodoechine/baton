@@ -48,9 +48,10 @@ The baton also names its owning repository — `Repo: /absolute/path/to/clone`. 
 shared resolver anchors linked worktrees to their owning clone and refuses to guess a
 directory outside Git. Pickup, status, and relay all use that resolver.
 
-The card is the **executable** layer; the project `CLAUDE.md` remains the narrative
-layer for humans and strong models. The card does not restate `CLAUDE.md` — it states
-literal commands with literal expected output.
+The card is the **executable** layer; the repository's applicable agent instructions
+(for example `AGENTS.md`, `CLAUDE.md`, or another designated file) remain the
+narrative layer. The card does not restate those files — it states literal commands
+with literal expected output.
 
 ## 2. Layout
 
@@ -295,11 +296,14 @@ that as a *blocking* error, wedging a tool call. Caught in the wild 2026-08-25.
 
 **Superseded 2026-09-01.** This spec once equated relay with starting an external
 `claude`. Relay is a receiver-neutral operation. The core now has built-in Codex and
-Claude Code adapters, a shell-free custom argv adapter, and a validated JSON manifest
-for host applications such as Codex Desktop. The relay core is Python 3.9+ so
-validation, path containment, quoting, and exit codes are shared across macOS, Linux,
-and Windows. When tmux exists, CLI `--spawn` launches an attachable session. Without
-tmux, the adapter must expose a non-interactive path that cannot wait invisibly.
+Claude Code adapters, a custom JSON argv adapter, and a validated JSON manifest for
+host applications such as Codex Desktop. Detached custom launches pass argv directly
+to the process API. tmux receives the receiver command and its arguments separately,
+which uses tmux's direct-execution form rather than `sh -c`. The relay core is Python
+3.9+ so validation, path containment, quoting, and exit codes are shared across macOS,
+Linux, and Windows. When tmux exists, CLI `--spawn` launches an attachable session.
+Without tmux, the adapter must expose a non-interactive path that cannot wait
+invisibly.
 
 The relay is wired to **`/baton cut` STEP 5 only**. Session `Stop` does not relay. A
 session hands off when a cut was actually asked for, never as a side effect of ending.
@@ -311,9 +315,9 @@ session hands off when a cut was actually asked for, never as a side effect of e
 | `BATON_RELAY_MAX_GEN` | `5` | Chain depth cap. At the cap `--spawn` refuses and prints the manual command. |
 | `BATON_RELAY_MODEL` | unset | Optional model override passed to either built-in receiver. |
 | `BATON_RELAY_PERMISSION_MODE` | unset | Claude adapter only; passed through to `--permission-mode`. Required for detached Claude. |
-| `BATON_RELAY_SANDBOX` | unset | Codex adapter only; `read-only`, `workspace-write`, or `danger-full-access`. Unset preserves Codex's read-only non-interactive default. |
+| `BATON_RELAY_SANDBOX` | unset | Codex adapter only; `read-only`, `workspace-write`, or `danger-full-access`. Unset makes Baton pass `read-only` explicitly instead of inheriting user config. |
 | `BATON_RELAY_APPROVAL_POLICY` | unset | Codex adapter only; `untrusted`, `on-request`, or `never`. |
-| `BATON_RELAY_COMMAND_JSON` | unset | Custom interactive argv as a JSON string array. Exact `{root}`, `{baton}`, and `{prompt}` tokens are replaced without invoking a shell. |
+| `BATON_RELAY_COMMAND_JSON` | unset | Custom interactive argv as a JSON string array. Exact `{root}`, `{baton}`, and `{prompt}` tokens are replaced. tmux receives each argv value separately. |
 | `BATON_RELAY_HEADLESS_COMMAND_JSON` | unset | Custom non-interactive argv; required before a custom receiver may detach without tmux. |
 
 Generation is carried in the child's environment, not on disk, so it **self-resets**: a
@@ -348,8 +352,8 @@ run would have shown, and `--spawn` now warns about both:
 2. **An interactive successor can stall at login, trust, or approval.** The relay emits
    an attach warning for interactive providers. A Claude headless fallback is never
    detached unless `BATON_RELAY_PERMISSION_MODE` is explicitly set. Codex uses the
-   supported non-interactive `codex exec` surface and preserves its read-only default
-   unless the user explicitly chooses another sandbox. A custom receiver detaches only
+   supported non-interactive `codex exec` surface and explicitly passes `read-only`
+   unless the user chooses another sandbox. A custom receiver detaches only
    when a separate headless argv is configured.
 
 Trust is recorded in `~/.claude.json` under the **realpath** of the root

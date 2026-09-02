@@ -8,12 +8,12 @@ current task lives in `.baton/BATON.md` and pins the card by hash.
 
 Use `$baton …` in Codex or `/baton …` in Claude Code.
 
-| Command | Action |
+| Action word | What it does |
 |---|---|
-| `/baton cut [--tier teaching\|brief]` | Validate, archive, and relay one task |
-| `/baton pickup` | Validate and read the pending baton |
-| `/baton card` | Update the stable layer after a process change |
-| `/baton status` | Report pending baton, age, card drift, pointer validity, and due state |
+| `cut [--tier teaching\|brief]` | Validate, archive, and relay one task |
+| `pickup` | Validate and read the pending baton |
+| `card` | Update the stable layer after a process change |
+| `status` | Report pending baton, age, card drift, pointer validity, and due state |
 
 Tiers control detail, not the receiver model. `teaching` is the 5,000-token default;
 `brief` is the 2,500-token budget for genuinely small tasks.
@@ -24,8 +24,10 @@ The core requires Python 3.9+ and Git and runs on macOS, Linux, and Windows. POS
 `.sh` and Windows PowerShell wrappers are conveniences; status, validation,
 installation, and relay logic live in Python.
 
-The relay has built-in Codex and Claude Code adapters plus a shell-free custom argv
-adapter. Codex Desktop can create a new local task from a validated launch manifest.
+The relay has built-in Codex and Claude Code adapters plus a shell-free custom JSON
+argv adapter. Detached launches pass argv directly to the process API; tmux receives
+the command and arguments separately. Codex Desktop can create a new local task from a
+validated launch manifest.
 For CLI use, tmux is optional: with tmux the successor is attachable; without tmux,
 Codex uses `codex exec`, while Claude starts a detached receiver only when
 `BATON_RELAY_PERMISSION_MODE` is explicitly set. Otherwise Baton prints the manual

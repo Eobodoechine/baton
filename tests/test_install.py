@@ -168,6 +168,18 @@ def test_installer_supports_codex_without_a_claude_directory(tmp_path):
     assert not (home / ".claude").exists()
 
 
+def test_distributed_skill_does_not_require_claude_project_instructions():
+    instructions = (ROOT / "skill" / "SKILL.md").read_text(encoding="utf-8")
+    template = (ROOT / "skill" / "templates" / "project_card.md").read_text(
+        encoding="utf-8")
+    normalized = " ".join(instructions.split())
+    normalized_template = " ".join(template.split())
+    assert "No vendor-specific instruction file is required" in normalized
+    assert "`AGENTS.md`" in instructions
+    assert "using the project's `CLAUDE.md`" not in instructions
+    assert "applicable agent instructions" in normalized_template
+
+
 def test_installer_can_target_both_supported_agents(tmp_path):
     source = tmp_path / "repo"
     shutil.copytree(ROOT, source, symlinks=True)
