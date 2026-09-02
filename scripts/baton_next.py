@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Cross-platform Baton relay.
+"""Cross-platform, receiver-neutral Baton relay.
 
-The validation and command-building path is standard-library Python. tmux remains the
-preferred attachable backend when present. Without tmux, `--spawn` can use a detached
-headless process only when an explicit permission mode is configured; otherwise it
-prints a safe manual command and exits 4.
+The validation and command-building path is standard-library Python. Built-in
+adapters support Codex and Claude Code. A JSON argv adapter supports other agents
+without routing through a shell. tmux is optional: it provides an attachable
+interactive receiver, while provider-specific non-interactive commands provide the
+safe detached fallback.
 """
 
+import argparse
 from datetime import datetime, timezone
 import json
 import os
@@ -22,6 +24,11 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 HOOKS_DIR = BASE_DIR / "hooks"
 sys.path.insert(0, str(HOOKS_DIR))
 import baton_gate  # noqa: E402
+
+
+PROVIDERS = ("auto", "codex", "claude", "custom")
+CODEX_SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
+CODEX_APPROVALS = ("untrusted", "on-request", "never")
 
 
 def format_command(args, windows=None):
@@ -74,12 +81,153 @@ Run the section 2 invariant check BEFORE touching anything. If it does not match
 and report the mismatch — do not improvise around it. Then execute section 3 in order,
 running each step's verify command. Do not do anything the baton does not ask for.
 
-(Baton relay generation {generation} of {maximum}. Cutting a baton at the end of this
-session will spawn generation {next_generation}; at {maximum} the chain stops and waits
-for a human.)""".format(
+(Baton relay generation {generation} of {maximum}. If this receiver later cuts another
+baton, pass --parent-generation {generation} to baton_next.py, or export
+BATON_RELAY_GEN={generation}, so the chain-depth cap remains intact. At {maximum} the
+chain stops and waits for a human.)""".format(
         path=path, generation=generation, maximum=maximum,
-        next_generation=generation + 1,
     )
+
+
+def _parse_nonnegative(value, name):
+    if value is None or not str(value).isdigit():
+        raise ValueError("%s must be a non-negative integer" % name)
+    return int(value)
+
+
+def relay_position(parent_generation=None, maximum=None):
+    raw_parent = (os.environ.get("BATON_RELAY_GEN", "0")
+                  if parent_generation is None else parent_generation)
+    raw_maximum = (os.environ.get("BATON_RELAY_MAX_GEN", "5")
+                   if maximum is None else maximum)
+    parent = _parse_nonnegative(raw_parent, "BATON_RELAY_GEN/--parent-generation")
+    cap = _parse_nonnegative(raw_maximum, "BATON_RELAY_MAX_GEN/--max-generation")
+    return parent + 1, cap
+
+
+def resolve_provider(requested=None):
+    requested = requested or os.environ.get("BATON_RELAY_PROVIDER", "auto")
+    requested = requested.lower()
+    if requested not in PROVIDERS:
+        raise ValueError("BATON_RELAY_PROVIDER must be one of: %s" %
+                         ", ".join(PROVIDERS))
+    if requested != "auto":
+        return requested
+    if os.environ.get("BATON_RELAY_COMMAND_JSON"):
+        return "custom"
+    available = [name for name in ("codex", "claude") if shutil.which(name)]
+    if len(available) == 1:
+        return available[0]
+    if not available:
+        raise FileNotFoundError(
+            "auto provider found neither 'codex' nor 'claude'; install one or set "
+            "BATON_RELAY_PROVIDER/BATON_RELAY_COMMAND_JSON")
+    raise ValueError(
+        "auto provider found both Codex and Claude Code; choose explicitly with "
+        "--provider codex or --provider claude")
+
+
+def _json_argv(name, required):
+    raw = os.environ.get(name, "")
+    if not raw:
+        if required:
+            raise ValueError("%s is required for the custom provider" % name)
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError("%s must be a JSON array: %s" % (name, exc))
+    if (not isinstance(value, list) or not value or
+            not all(isinstance(item, str) and item for item in value)):
+        raise ValueError("%s must be a non-empty JSON array of non-empty strings" % name)
+    return value
+
+
+def _expand_custom(argv, root, baton, prompt):
+    replacements = {"{root}": str(root), "{baton}": str(baton), "{prompt}": prompt}
+    expanded = [replacements.get(item, item) for item in argv]
+    if "{prompt}" not in argv:
+        expanded.append(prompt)
+    return expanded
+
+
+def build_adapter(provider, root, baton, prompt, model):
+    root = os.path.realpath(root)
+    if provider == "claude":
+        permission = os.environ.get("BATON_RELAY_PERMISSION_MODE", "")
+        common = (["--model", model] if model else [])
+        interactive = ["claude"] + common
+        if permission:
+            interactive += ["--permission-mode", permission]
+        interactive.append(prompt)
+        headless = ["claude", "-p"] + common
+        if permission:
+            headless += ["--permission-mode", permission]
+        headless.append(prompt)
+        return {
+            "provider": provider,
+            "interactive": interactive,
+            "headless": headless,
+            "headless_safe": bool(permission),
+            "model": model or "inherited from Claude Code config",
+            "wait_warning": (None if permission else
+                             "! NO PERMISSION MODE — Claude may wait at trust or approval."),
+            "permission_summary": permission or "interactive approvals",
+        }
+    if provider == "codex":
+        sandbox = os.environ.get("BATON_RELAY_SANDBOX", "")
+        approval = os.environ.get("BATON_RELAY_APPROVAL_POLICY", "")
+        if sandbox and sandbox not in CODEX_SANDBOXES:
+            raise ValueError("BATON_RELAY_SANDBOX must be one of: %s" %
+                             ", ".join(CODEX_SANDBOXES))
+        if approval and approval not in CODEX_APPROVALS:
+            raise ValueError("BATON_RELAY_APPROVAL_POLICY must be one of: %s" %
+                             ", ".join(CODEX_APPROVALS))
+        common = ["-C", root]
+        if model:
+            common += ["--model", model]
+        if sandbox:
+            common += ["--sandbox", sandbox]
+        if approval:
+            common += ["--ask-for-approval", approval]
+        interactive = ["codex"] + common + [prompt]
+        headless = ["codex", "exec"] + common + [prompt]
+        wait_warning = None
+        if approval != "never":
+            wait_warning = "! CODEX INTERACTIVE — attach for login or approval prompts."
+        return {
+            "provider": provider,
+            "interactive": interactive,
+            "headless": headless,
+            "headless_safe": True,
+            "model": model or "inherited from Codex config",
+            "wait_warning": wait_warning,
+            "permission_summary": "sandbox=%s, approvals=%s" % (
+                sandbox or "read-only default", approval or "Codex default"),
+        }
+    if provider == "custom":
+        interactive_raw = _json_argv("BATON_RELAY_COMMAND_JSON", required=True)
+        headless_raw = _json_argv("BATON_RELAY_HEADLESS_COMMAND_JSON", required=False)
+        interactive = _expand_custom(interactive_raw, root, baton, prompt)
+        headless = (_expand_custom(headless_raw, root, baton, prompt)
+                    if headless_raw else None)
+        return {
+            "provider": provider,
+            "interactive": interactive,
+            "headless": headless,
+            "headless_safe": headless is not None,
+            "model": "controlled by custom command",
+            "wait_warning": "! CUSTOM INTERACTIVE RECEIVER — attach for prompts.",
+            "permission_summary": "controlled by custom command",
+        }
+    raise ValueError("unsupported provider: %s" % provider)
+
+
+def _command_available(command):
+    executable = command[0]
+    if os.path.dirname(executable):
+        return os.path.isfile(executable) and os.access(executable, os.X_OK)
+    return shutil.which(executable) is not None
 
 
 def _prune(relay_dir):
@@ -94,11 +242,11 @@ def _prune(relay_dir):
                 pass
 
 
-def _append_log(root, generation, maximum, session, baton, backend, pid=None):
+def _append_log(root, generation, maximum, session, baton, backend, provider, pid=None):
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fields = [stamp, "relay", "gen=%s/%s" % (generation, maximum),
               "session=%s" % session, "baton=%s" % baton,
-              "backend=%s" % backend]
+              "backend=%s" % backend, "provider=%s" % provider]
     if pid is not None:
         fields.append("pid=%s" % pid)
     with open(Path(root) / ".baton" / "batons.log", "a", encoding="utf-8") as fh:
@@ -147,80 +295,87 @@ def _detached_spawn(command, root, log, env):
     return process.pid
 
 
-def spawn(root, baton, model):
-    raw_generation = os.environ.get("BATON_RELAY_GEN", "0")
-    raw_maximum = os.environ.get("BATON_RELAY_MAX_GEN", "5")
-    if not raw_generation.isdigit() or not raw_maximum.isdigit():
-        print("baton relay: BATON_RELAY_GEN/MAX_GEN must be integers", file=sys.stderr)
-        return 2
-    generation = int(raw_generation) + 1
-    maximum = int(raw_maximum)
-    prompt = relay_prompt(baton, generation, maximum)
-    manual = ["claude"] + (["--model", model] if model else []) + [prompt]
+def _depth_refusal(adapter, generation, maximum):
+    print("baton relay: chain depth cap reached (generation %s > %s)." %
+          (generation, maximum), file=sys.stderr)
+    print(format_command(adapter["interactive"]))
+    return 3
+
+
+def spawn(root, baton, adapter, generation, maximum):
     if generation > maximum:
-        print("baton relay: chain depth cap reached (generation %s > %s)." %
-              (generation, maximum), file=sys.stderr)
-        print(format_command(manual))
-        return 3
+        return _depth_refusal(adapter, generation, maximum)
 
     relay_dir = Path(root) / ".baton" / "relay"
     relay_dir.mkdir(parents=True, exist_ok=True)
     _prune(relay_dir)
     slug = re.sub(r"[^A-Za-z0-9]+", "-", Path(root).name).strip("-") or "project"
-    session = "baton-%s-g%s-%s-%s" % (
-        slug, generation, datetime.now().strftime("%H%M%S"), os.getpid())
+    session = "baton-%s-%s-g%s-%s-%s" % (
+        slug, adapter["provider"], generation,
+        datetime.now().strftime("%H%M%S"), os.getpid())
     log = relay_dir / (session + ".log")
-    permission = os.environ.get("BATON_RELAY_PERMISSION_MODE", "")
     env = dict(os.environ, BATON_RELAY_GEN=str(generation),
-               BATON_RELAY_MAX_GEN=str(maximum))
-    interactive = ["claude"] + (["--model", model] if model else [])
-    if permission:
-        interactive += ["--permission-mode", permission]
-    interactive.append(prompt)
+               BATON_RELAY_MAX_GEN=str(maximum),
+               BATON_RELAY_PROVIDER=adapter["provider"])
 
     tmux = shutil.which("tmux")
     if tmux:
+        if not _command_available(adapter["interactive"]):
+            print("baton relay: %s executable is unavailable: %s" % (
+                adapter["provider"], adapter["interactive"][0]), file=sys.stderr)
+            return 7
         try:
-            _tmux_spawn(tmux, os.path.realpath(root), session, interactive, log)
+            _tmux_spawn(tmux, os.path.realpath(root), session,
+                        adapter["interactive"], log)
         except FileExistsError as exc:
             print("baton relay: %s" % exc, file=sys.stderr)
             return 6
         except (OSError, subprocess.CalledProcessError) as exc:
             print("baton relay: tmux failed: %s" % exc, file=sys.stderr)
             return 7
-        _append_log(root, generation, maximum, session, baton, "tmux")
+        _append_log(root, generation, maximum, session, baton, "tmux",
+                    adapter["provider"])
         print("baton relay: successor started.\n")
+        print("  provider   %s" % adapter["provider"])
         print("  backend    tmux")
         print("  session    %s" % session)
         print("  generation %s of %s" % (generation, maximum))
-        print("  model      %s" % (model or "inherited from Claude Code config"))
+        print("  model      %s" % adapter["model"])
+        print("  policy     %s" % adapter["permission_summary"])
         print("  detail     %s" % baton_tier(baton))
         print("  cwd        %s" % root)
         print("  baton      %s" % baton)
         print("  log        %s" % log)
         print("\n  watch it   tmux attach -t %s" % session)
-        if not permission:
-            print("\nWILL WAIT FOR YOU:\n  ! NO PERMISSION MODE — the successor may wait at an approval prompt.")
+        if adapter["wait_warning"]:
+            print("\nWILL WAIT FOR YOU:\n  %s" % adapter["wait_warning"])
         return 0
 
-    if not permission:
-        print("baton relay: no tmux and BATON_RELAY_PERMISSION_MODE is unset; "
-              "refusing to detach a process that may wait invisibly.", file=sys.stderr)
-        print(format_command(manual))
+    headless = adapter["headless"]
+    if not headless or not adapter["headless_safe"]:
+        print("baton relay: no tmux and the %s provider has no explicitly safe "
+              "headless configuration; refusing to detach a process that may wait "
+              "invisibly." % adapter["provider"], file=sys.stderr)
+        print(format_command(adapter["interactive"]))
         return 4
-    headless = ["claude", "-p"] + (["--model", model] if model else []) + [
-        "--permission-mode", permission, prompt]
+    if not _command_available(headless):
+        print("baton relay: %s executable is unavailable: %s" % (
+            adapter["provider"], headless[0]), file=sys.stderr)
+        return 7
     try:
-        pid = _detached_spawn(headless, root, log, env)
+        pid = _detached_spawn(headless, os.path.realpath(root), log, env)
     except OSError as exc:
         print("baton relay: detached spawn failed: %s" % exc, file=sys.stderr)
         return 7
-    _append_log(root, generation, maximum, session, baton, "detached-headless", pid)
+    _append_log(root, generation, maximum, session, baton, "detached-headless",
+                adapter["provider"], pid)
     print("baton relay: successor started.\n")
+    print("  provider   %s" % adapter["provider"])
     print("  backend    detached-headless")
     print("  pid        %s" % pid)
     print("  generation %s of %s" % (generation, maximum))
-    print("  model      %s" % (model or "inherited from Claude Code config"))
+    print("  model      %s" % adapter["model"])
+    print("  policy     %s" % adapter["permission_summary"])
     print("  cwd        %s" % root)
     print("  baton      %s" % baton)
     print("  log        %s" % log)
@@ -228,12 +383,31 @@ def spawn(root, baton, model):
     return 0
 
 
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Validate and relay the current Baton")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--print", dest="mode", action="store_const", const="print",
+                       help="print the interactive receiver command (default)")
+    modes.add_argument("--headless", dest="mode", action="store_const", const="headless",
+                       help="print the non-interactive receiver command")
+    modes.add_argument("--exec", dest="mode", action="store_const", const="exec",
+                       help="replace this process with the interactive receiver")
+    modes.add_argument("--spawn", dest="mode", action="store_const", const="spawn",
+                       help="start an attachable or safe detached receiver")
+    modes.add_argument("--manifest", dest="mode", action="store_const", const="manifest",
+                       help="print a validated JSON launch manifest for a host app")
+    parser.set_defaults(mode="print")
+    parser.add_argument("--provider", choices=PROVIDERS,
+                        help="receiver adapter (or BATON_RELAY_PROVIDER)")
+    parser.add_argument("--parent-generation", type=int,
+                        help="parent generation for app-hosted relays")
+    parser.add_argument("--max-generation", type=int,
+                        help="override the chain-depth cap")
+    return parser.parse_args(argv)
+
+
 def main(argv=None):
-    argv = list(sys.argv[1:] if argv is None else argv)
-    mode = argv[0] if argv else "--print"
-    if mode not in ("--print", "--headless", "--exec", "--spawn"):
-        print("usage: baton_next.py [--print|--headless|--exec|--spawn]", file=sys.stderr)
-        return 2
+    args = parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
         root, baton = load_baton()
     except FileNotFoundError as exc:
@@ -253,24 +427,58 @@ def main(argv=None):
         print("baton relay: '%s' is invalid or belongs to a different repository."
               % baton, file=sys.stderr)
         return 5
-    model = os.environ.get("BATON_RELAY_MODEL", "")
-    prompt = "Read %s and execute it. Follow it exactly; do not expand scope." % baton
-    command = ["claude"] + (["--model", model] if model else []) + [prompt]
-    if mode == "--headless":
-        print(format_command(["claude", "-p"] + command[1:]))
+    try:
+        provider = resolve_provider(args.provider)
+        generation, maximum = relay_position(args.parent_generation, args.max_generation)
+        prompt = relay_prompt(baton, generation, maximum)
+        model = os.environ.get("BATON_RELAY_MODEL", "")
+        adapter = build_adapter(provider, root, baton, prompt, model)
+    except ValueError as exc:
+        print("baton relay: %s" % exc, file=sys.stderr)
+        return 2
+    except FileNotFoundError as exc:
+        print("baton relay: %s" % exc, file=sys.stderr)
+        return 7
+
+    if args.mode == "manifest":
+        if generation > maximum:
+            return _depth_refusal(adapter, generation, maximum)
+        print(json.dumps({
+            "schema_version": 1,
+            "provider": provider,
+            "root": os.path.realpath(root),
+            "baton": str(baton),
+            "prompt": prompt,
+            "generation": generation,
+            "maximum_generation": maximum,
+            "detail": baton_tier(baton),
+        }, sort_keys=True))
         return 0
-    if mode == "--print":
-        print(format_command(command))
+    if args.mode == "headless":
+        if not adapter["headless"]:
+            print("baton relay: provider has no headless command; set "
+                  "BATON_RELAY_HEADLESS_COMMAND_JSON", file=sys.stderr)
+            return 2
+        print(format_command(adapter["headless"]))
         return 0
-    if mode == "--exec":
+    if args.mode == "print":
+        print(format_command(adapter["interactive"]))
+        return 0
+    if args.mode == "exec":
+        command = adapter["interactive"]
+        if not _command_available(command):
+            print("baton relay: cannot start %s; executable unavailable: %s" %
+                  (provider, command[0]), file=sys.stderr)
+            return 7
         try:
             if os.name == "nt":
-                return subprocess.call(command)
+                return subprocess.call(command, cwd=os.path.realpath(root))
+            os.chdir(os.path.realpath(root))
             os.execvp(command[0], command)
         except OSError as exc:
-            print("baton relay: cannot start claude: %s" % exc, file=sys.stderr)
+            print("baton relay: cannot start %s: %s" % (provider, exc), file=sys.stderr)
             return 7
-    return spawn(root, baton, model)
+    return spawn(root, baton, adapter, generation, maximum)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ current task lives in `.baton/BATON.md` and pins the card by hash.
 
 ## Commands
 
+Use `$baton …` in Codex or `/baton …` in Claude Code.
+
 | Command | Action |
 |---|---|
 | `/baton cut [--tier teaching\|brief]` | Validate, archive, and relay one task |
@@ -22,9 +24,11 @@ The core requires Python 3.9+ and Git and runs on macOS, Linux, and Windows. POS
 `.sh` and Windows PowerShell wrappers are conveniences; status, validation,
 installation, and relay logic live in Python.
 
-tmux is optional. With tmux, an auto-spawned successor is attachable. Without tmux,
-Baton can start a detached headless successor only when
-`BATON_RELAY_PERMISSION_MODE` is explicitly set; otherwise it prints the manual
+The relay has built-in Codex and Claude Code adapters plus a shell-free custom argv
+adapter. Codex Desktop can create a new local task from a validated launch manifest.
+For CLI use, tmux is optional: with tmux the successor is attachable; without tmux,
+Codex uses `codex exec`, while Claude starts a detached receiver only when
+`BATON_RELAY_PERMISSION_MODE` is explicitly set. Otherwise Baton prints the manual
 command and refuses an invisible wait.
 
 Hooks are optional. They add context measurement, due notices, a bounded Stop gate in

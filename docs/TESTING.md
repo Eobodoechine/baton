@@ -12,7 +12,7 @@ separately from the core.
 | Component | status JSON, installer behavior, linter failures, due-cycle reset | yes |
 | Offline integration | safe pointer pickup, relay validation, fake tmux, detached fake receiver, fixture lint | yes |
 | Platform contract | Python 3.9 and 3.13 on macOS, Linux, and Windows | yes |
-| Live acceptance | real Claude process, trust prompt, permission prompt, attachable tmux session, native Windows headless run | manual |
+| Live acceptance | real Codex and Claude receivers, host-app task creation, trust/permission prompts, attachable tmux, native Windows headless run | manual |
 | Research eval | Baton versus prose receiver performance | manual and potentially paid |
 
 ## Required coverage
@@ -20,6 +20,8 @@ separately from the core.
 Critical decision outcomes have stronger targets than raw line coverage:
 
 - Every relay exit code (0–7) has an offline test or a documented live-only case.
+- Codex, Claude, and custom command construction are tested without starting a model;
+  `auto` is tested for one receiver, two-receiver ambiguity, and no-receiver failure.
 - Every untrusted path input is tested: forged session id, outside pointer, symlink,
   missing target, invalid baton, and headings quoted in comments or fences.
 - Every installer outcome is tested: link, link-unavailable copy, idempotent rerun,
@@ -48,8 +50,10 @@ shellcheck install.sh scripts/baton_next.sh skill/scripts/baton_status.sh evals/
 
 Before calling a release portable, record each result separately:
 
-1. macOS: install, status, guarded hook command, tmux relay, and manual fallback.
-2. Linux: the same five checks in a clean user account or container.
+1. macOS: Codex and Claude install targets, status, guarded hook command, Codex Desktop
+   manifest/task creation, tmux relay, and manual fallback.
+2. Linux: both CLI adapters, custom argv, install, status, tmux, and no-tmux paths in a
+   clean user account or container.
 3. Windows: `install.py`, PowerShell wrappers, status, invalid-pointer refusal, and
    detached headless relay with a non-production fixture.
 4. Reinstall/update from a marked-copy installation and confirm owner files are not
@@ -57,4 +61,4 @@ Before calling a release portable, record each result separately:
 5. Run a real successor only with explicit authorization for any paid model usage.
 
 Green offline CI is source-level portability evidence. It is not proof that a real
-Claude session, tmux backend, or native Windows host has completed a live handoff.
+Codex task, Claude session, tmux backend, or native Windows host completed a handoff.

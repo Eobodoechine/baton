@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline relay tests. No model process or real tmux session is started."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -66,6 +67,11 @@ def run(root, *args, env=None):
         "BATON_RELAY_MAX_GEN",
         "BATON_RELAY_MODEL",
         "BATON_RELAY_PERMISSION_MODE",
+        "BATON_RELAY_PROVIDER",
+        "BATON_RELAY_SANDBOX",
+        "BATON_RELAY_APPROVAL_POLICY",
+        "BATON_RELAY_COMMAND_JSON",
+        "BATON_RELAY_HEADLESS_COMMAND_JSON",
     ):
         merged.pop(key, None)
     merged.update(env or {})
@@ -75,18 +81,27 @@ def run(root, *args, env=None):
     )
 
 
-def test_headless_prints_a_shell_escaped_command(tmp_path):
+def test_claude_headless_prints_a_shell_escaped_command(tmp_path):
     root = project(tmp_path)
-    result = run(root, "--headless")
+    result = run(root, "--headless", "--provider", "claude")
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("claude -p ")
     assert "BATON.md" in result.stdout
 
 
+def test_codex_headless_uses_official_exec_surface(tmp_path):
+    root = project(tmp_path)
+    result = run(root, "--headless", "--provider", "codex")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("codex exec -C ")
+    assert str(root) in result.stdout
+    assert "BATON.md" in result.stdout
+
+
 def test_command_formatting_supports_windows_and_posix():
-    args = ["claude", "a path with spaces", 'a "quote"']
-    assert relay.format_command(args, windows=False).startswith("claude ")
-    assert relay.format_command(args, windows=True).startswith("claude ")
+    args = ["receiver", "a path with spaces", 'a "quote"']
+    assert relay.format_command(args, windows=False).startswith("receiver ")
+    assert relay.format_command(args, windows=True).startswith("receiver ")
     assert "a path with spaces" in relay.format_command(args, windows=True)
 
 
@@ -95,7 +110,7 @@ def test_relay_refuses_pointer_outside_repository(tmp_path):
     outside = tmp_path / "outside.md"
     outside.write_text(valid_body(str(root)))
     (root / ".baton" / "BATON_CURRENT").write_text(str(outside))
-    result = run(root, "--headless")
+    result = run(root, "--headless", "--provider", "codex")
     assert result.returncode == 5
     assert "outside" in result.stderr
 
@@ -107,7 +122,7 @@ def test_relay_uses_linter_not_substring_presence(tmp_path):
         "## 4. DO NOT RETRY\nnone",
         "## 9. GOTCHAS\n```markdown\n## 4. DO NOT RETRY\n```",
     ))
-    result = run(root, "--headless")
+    result = run(root, "--headless", "--provider", "codex")
     assert result.returncode == 5
     assert "missing mandatory section: ## 4" in result.stderr
 
@@ -126,20 +141,27 @@ def test_spawn_uses_fake_tmux_and_never_starts_a_real_model(tmp_path):
         "exit 0\n"
     )
     tmux.chmod(0o755)
-    result = run(root, "--spawn", env={
+    codex = fake_bin / "codex"
+    codex.write_text("#!/bin/sh\necho should-not-run-directly\n")
+    codex.chmod(0o755)
+    result = run(root, "--spawn", "--provider", "codex", env={
         "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
         "FAKE_TMUX_CALLS": str(calls),
     })
     assert result.returncode == 0, result.stderr
     assert "successor started" in result.stdout
+    assert "provider   codex" in result.stdout
     assert "new-session" in calls.read_text()
-    assert "\trelay\t" in (root / ".baton" / "batons.log").read_text()
+    logged = (root / ".baton" / "batons.log").read_text()
+    assert "\trelay\t" in logged
+    assert "provider=codex" in logged
 
 
 @pytest.mark.skipif(os.name == "nt", reason="PATH isolation fixture is POSIX-only")
 def test_spawn_without_tmux_refuses_an_invisible_wait(tmp_path):
     root = project(tmp_path)
-    result = run(root, "--spawn", env={"PATH": "/usr/bin:/bin"})
+    result = run(root, "--spawn", "--provider", "claude",
+                 env={"PATH": "/usr/bin:/bin"})
     assert result.returncode == 4
     assert "refusing to detach" in result.stderr
     assert "claude" in result.stdout
@@ -151,8 +173,14 @@ def test_relay_tests_ignore_parent_session_controls(tmp_path, monkeypatch):
     monkeypatch.setenv("BATON_RELAY_MAX_GEN", "1")
     monkeypatch.setenv("BATON_RELAY_MODEL", "parent-model")
     monkeypatch.setenv("BATON_RELAY_PERMISSION_MODE", "auto")
+    monkeypatch.setenv("BATON_RELAY_PROVIDER", "codex")
+    monkeypatch.setenv("BATON_RELAY_SANDBOX", "danger-full-access")
+    monkeypatch.setenv("BATON_RELAY_APPROVAL_POLICY", "never")
+    monkeypatch.setenv("BATON_RELAY_COMMAND_JSON", '["parent-agent"]')
+    monkeypatch.setenv("BATON_RELAY_HEADLESS_COMMAND_JSON", '["parent-headless"]')
     root = project(tmp_path)
-    result = run(root, "--spawn", env={"PATH": "/usr/bin:/bin"})
+    result = run(root, "--spawn", "--provider", "claude",
+                 env={"PATH": "/usr/bin:/bin"})
     assert result.returncode == 4
     assert "refusing to detach" in result.stderr
 
@@ -165,7 +193,7 @@ def test_spawn_without_tmux_can_use_explicit_headless_backend(tmp_path):
     claude = fake_bin / "claude"
     claude.write_text("#!/bin/sh\necho fake-claude-finished\n")
     claude.chmod(0o755)
-    result = run(root, "--spawn", env={
+    result = run(root, "--spawn", "--provider", "claude", env={
         "PATH": str(fake_bin) + ":/usr/bin:/bin",
         "BATON_RELAY_PERMISSION_MODE": "acceptEdits",
     })
@@ -173,3 +201,119 @@ def test_spawn_without_tmux_can_use_explicit_headless_backend(tmp_path):
     assert "detached-headless" in result.stdout
     assert "backend=detached-headless" in (
         root / ".baton" / "batons.log").read_text()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake executable fixture is POSIX-only")
+def test_codex_can_use_safe_noninteractive_backend_without_tmux(tmp_path):
+    root = project(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    codex = fake_bin / "codex"
+    codex.write_text("#!/bin/sh\necho fake-codex-finished\n")
+    codex.chmod(0o755)
+    result = run(root, "--spawn", "--provider", "codex", env={
+        "PATH": str(fake_bin) + ":/usr/bin:/bin",
+        "BATON_RELAY_SANDBOX": "workspace-write",
+        "BATON_RELAY_APPROVAL_POLICY": "never",
+    })
+    assert result.returncode == 0, result.stderr
+    assert "provider   codex" in result.stdout
+    assert "detached-headless" in result.stdout
+    assert "sandbox=workspace-write" in result.stdout
+    assert "provider=codex" in (
+        root / ".baton" / "batons.log").read_text()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake executable fixture is POSIX-only")
+def test_auto_provider_selects_the_only_installed_receiver(tmp_path):
+    root = project(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    codex = fake_bin / "codex"
+    codex.write_text("#!/bin/sh\nexit 0\n")
+    codex.chmod(0o755)
+    result = run(root, "--print", env={
+        "PATH": str(fake_bin) + ":/usr/bin:/bin",
+    })
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("codex -C ")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake executable fixture is POSIX-only")
+def test_auto_provider_refuses_to_guess_when_both_are_installed(tmp_path):
+    root = project(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name in ("codex", "claude"):
+        executable = fake_bin / name
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+    result = run(root, "--print", env={
+        "PATH": str(fake_bin) + ":/usr/bin:/bin",
+    })
+    assert result.returncode == 2
+    assert "found both" in result.stderr
+    assert "--provider codex" in result.stderr
+
+
+def test_custom_provider_uses_json_argv_without_a_shell(tmp_path):
+    root = project(tmp_path)
+    result = run(root, "--print", "--provider", "custom", env={
+        "BATON_RELAY_COMMAND_JSON": '["my agent", "--repo", "{root}", "{prompt}"]',
+    })
+    assert result.returncode == 0, result.stderr
+    assert "my agent" in result.stdout
+    assert str(root) in result.stdout
+    assert "Pick up the baton" in result.stdout
+
+
+def test_manifest_is_validated_provider_neutral_host_input(tmp_path):
+    root = project(tmp_path)
+    result = run(root, "--manifest", "--provider", "codex",
+                 "--parent-generation", "2", "--max-generation", "5")
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(result.stdout)
+    assert manifest["schema_version"] == 1
+    assert manifest["provider"] == "codex"
+    assert manifest["root"] == str(root)
+    assert manifest["generation"] == 3
+    assert manifest["maximum_generation"] == 5
+    assert "--parent-generation 3" in manifest["prompt"]
+
+
+def test_manifest_honors_the_depth_cap(tmp_path):
+    root = project(tmp_path)
+    result = run(root, "--manifest", "--provider", "codex",
+                 "--parent-generation", "5", "--max-generation", "5")
+    assert result.returncode == 3
+    assert "depth cap" in result.stderr
+    assert result.stdout.startswith("codex -C ")
+
+
+def test_invalid_codex_policy_fails_before_launch(tmp_path):
+    root = project(tmp_path)
+    result = run(root, "--manifest", "--provider", "codex", env={
+        "BATON_RELAY_SANDBOX": "everything",
+    })
+    assert result.returncode == 2
+    assert "BATON_RELAY_SANDBOX" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="PATH isolation fixture is POSIX-only")
+def test_auto_provider_reports_when_no_receiver_is_installed(tmp_path):
+    root = project(tmp_path)
+    result = run(root, "--print", env={"PATH": "/usr/bin:/bin"})
+    assert result.returncode == 7
+    assert "found neither" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="PATH isolation fixture is POSIX-only")
+def test_custom_provider_without_headless_argv_refuses_detach(tmp_path):
+    root = project(tmp_path)
+    result = run(root, "--spawn", "--provider", "custom", env={
+        "PATH": "/usr/bin:/bin",
+        "BATON_RELAY_COMMAND_JSON": '["my-agent", "{prompt}"]',
+    })
+    assert result.returncode == 4
+    assert "no explicitly safe headless" in result.stderr
+    assert "my-agent" in result.stdout

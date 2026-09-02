@@ -17,14 +17,15 @@ sys.path.insert(0, str(ROOT))
 import install as installer  # noqa: E402
 
 
-def install_copy(tmp_path):
+def install_copy(tmp_path, agent="claude"):
     source = tmp_path / "repo with spaces"
     shutil.copytree(ROOT, source, symlinks=True)
     home = tmp_path / "home"
     home.mkdir()
     env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
     result = subprocess.run(
-        [sys.executable, str(source / "install.py")], cwd=source, env=env,
+        [sys.executable, str(source / "install.py"), "--agent", agent],
+        cwd=source, env=env,
         capture_output=True, text=True,
     )
     return source, home, result
@@ -73,7 +74,8 @@ def test_installer_is_idempotent_for_its_own_link(tmp_path):
     source, home, first = install_copy(tmp_path)
     assert first.returncode == 0
     second = subprocess.run(
-        [sys.executable, str(source / "install.py")], cwd=source,
+        [sys.executable, str(source / "install.py"), "--agent", "claude"],
+        cwd=source,
         env=dict(os.environ, HOME=str(home), USERPROFILE=str(home)),
         capture_output=True, text=True,
     )
@@ -90,7 +92,8 @@ def test_installer_refuses_to_overwrite_an_existing_skill(tmp_path):
     destination.mkdir(parents=True)
     (destination / "owner-file").write_text("keep")
     result = subprocess.run(
-        [sys.executable, str(source / "install.py")], cwd=source,
+        [sys.executable, str(source / "install.py"), "--agent", "claude"],
+        cwd=source,
         env=dict(os.environ, HOME=str(home), USERPROFILE=str(home)),
         capture_output=True, text=True,
     )
@@ -150,3 +153,48 @@ def test_marked_copy_updates_only_when_installed_files_are_unchanged(
     updated.write_text(updated.read_text() + "\nsecond update\n")
     with pytest.raises(FileExistsError, match="locally changed"):
         installer.install(repo=source, home=home, skills_dir=home / "skills")
+
+
+def test_installer_supports_codex_without_a_claude_directory(tmp_path):
+    source, home, result = install_copy(tmp_path, agent="codex")
+    assert result.returncode == 0, result.stderr
+    assert "Installed for: codex" in result.stdout
+    assert "BEGIN BATON HOOK JSON" not in result.stdout
+    link = home / ".codex" / "skills" / "baton"
+    assert link.exists()
+    if link.is_symlink():
+        assert link.resolve() == source / "skill"
+    assert not (home / ".claude").exists()
+
+
+def test_installer_can_target_both_supported_agents(tmp_path):
+    source = tmp_path / "repo"
+    shutil.copytree(ROOT, source, symlinks=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    result = subprocess.run(
+        [sys.executable, str(source / "install.py"), "--agent", "all"],
+        cwd=source,
+        env=dict(os.environ, HOME=str(home), USERPROFILE=str(home)),
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Installed for: codex, claude" in result.stdout
+    assert (home / ".codex" / "skills" / "baton").exists()
+    assert (home / ".claude" / "skills" / "baton").exists()
+
+
+def test_auto_detection_returns_all_present_supported_agents(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".claude").mkdir()
+    monkeypatch.setattr(installer.shutil, "which", lambda _name: None)
+    assert installer.detect_agents(home) == ["codex", "claude"]
+
+
+def test_auto_detection_does_not_default_to_claude(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(installer.shutil, "which", lambda _name: None)
+    with pytest.raises(ValueError, match="could not detect"):
+        installer._requested_agents(None, home)

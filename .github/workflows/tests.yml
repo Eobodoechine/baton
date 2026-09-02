@@ -32,7 +32,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
           $env:HOME = $sandbox
           $env:USERPROFILE = $sandbox
-          ./install.ps1 | Out-Null
+          ./install.ps1 --agent codex | Out-Null
           $status = ./skill/scripts/baton_status.ps1 | ConvertFrom-Json
           if (-not $status.root) { throw 'status wrapper returned no repository root' }
 

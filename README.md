@@ -1,6 +1,6 @@
 # baton
 
-Session handoff for Claude Code. A **baton** is a small, self-contained document that
+Session handoff for coding agents. A **baton** is a small, self-contained document that
 lets a fresh, contextless session pick up unfinished work exactly where the last one
 stopped — and, optionally, start that session for you automatically.
 
@@ -15,21 +15,26 @@ installer:
 ```sh
 git clone https://github.com/Eobodoechine/baton.git
 cd baton
-python3 install.py          # macOS/Linux
-py -3 install.py            # Windows
+python3 install.py --agent codex    # macOS/Linux, Codex
+python3 install.py --agent claude   # macOS/Linux, Claude Code
+py -3 install.py --agent codex      # Windows, Codex
 ```
 
 `install.sh` and `install.ps1` are convenience wrappers around the same Python
-installer.
+installer. Omit `--agent` to install into every locally detected supported agent, or
+use `--agent all` explicitly.
 
-The installer links `skill/` into `~/.claude/skills/baton` and prints valid hook JSON
-for you to merge. If directory symlinks are unavailable (common on Windows without
-Developer Mode), it creates a clearly marked copy instead. It refuses to clobber an
-existing install and never edits `settings.json`.
+The installer links `skill/` into `~/.codex/skills/baton`,
+`~/.claude/skills/baton`, or both. If directory symlinks are unavailable (common on
+Windows without Developer Mode), it creates a clearly marked copy instead. It refuses
+to clobber an existing install and never edits agent settings. When Claude Code is one
+of the targets, it also prints optional hook JSON for you to merge; those hooks are a
+Claude adapter, not a requirement for Baton itself.
 
 Hooks are entirely optional. With zero hooks wired the skill works fully by hand.
 
-Then, in any project, from a Claude Code session that is running long:
+Then, in any project, ask the installed skill to run one of these actions. Codex users
+can write `$baton cut`; Claude Code users can write `/baton cut`:
 
 ```
 /baton card      once per project, describe how work is done here
@@ -95,8 +100,25 @@ examples.
 
 ## The relay (auto-spawn)
 
-`/baton cut` ends by running `python scripts/baton_next.py --spawn`. When tmux is
-available, it starts the successor as a detached, attachable tmux session:
+The relay is receiver-neutral. Built-in adapters support Codex and Claude Code, and a
+shell-free JSON argv adapter supports other agents. Choose explicitly when more than
+one supported receiver is installed:
+
+```sh
+python scripts/baton_next.py --spawn --provider codex
+python scripts/baton_next.py --spawn --provider claude
+```
+
+`--provider auto` is the default. It selects the only installed built-in receiver. If
+both are present it exits 2 and asks you to choose instead of silently favoring one.
+
+Inside Codex Desktop, the skill first validates the baton with
+`--manifest --provider codex`, then uses the app's task-creation capability when the
+current repository is available as a local project. The returned task ID is the launch
+receipt. Outside the desktop app, `--spawn` uses the Codex or Claude CLI.
+
+When tmux is available, CLI relay starts the successor as a detached, attachable tmux
+session:
 
 ```
 tmux attach -t baton-<project>-g1-143022    # watch or interject; ctrl-b d to detach
@@ -108,25 +130,37 @@ child's *environment*, not on disk, so it self-resets: a session you start by ha
 always generation 0 and cannot inherit a stale counter. At the cap, `--spawn` refuses
 and prints the manual command.
 
-Without tmux, Baton has two safe behaviors on every platform:
+Without tmux, behavior depends on the receiver's supported non-interactive surface:
 
-- If `BATON_RELAY_PERMISSION_MODE` is set, it starts a detached headless successor and
-  prints its PID and log path.
-- If the permission mode is unset, it refuses to create a process that may wait
-  invisibly, prints the manual command, and exits 4.
+- Codex uses the official non-interactive `codex exec` command. Its default sandbox is
+  read-only. Set `BATON_RELAY_SANDBOX=workspace-write` only when the baton must edit,
+  and optionally set `BATON_RELAY_APPROVAL_POLICY=never` for a fully unattended run.
+- Claude Code starts a detached headless receiver only when
+  `BATON_RELAY_PERMISSION_MODE` is explicitly set. Otherwise it prints the manual
+  command and exits 4 rather than hiding a waiting approval prompt.
+- A custom receiver needs both `BATON_RELAY_COMMAND_JSON` and, for detached use,
+  `BATON_RELAY_HEADLESS_COMMAND_JSON`. Each is a JSON array of argv strings; Baton does
+  not run it through a shell. Exact `{root}`, `{baton}`, and `{prompt}` tokens are
+  replaced. If `{prompt}` is absent, the prompt is appended.
 
-Relay exits are stable: `1` no baton, `2` invalid relay settings, `3` depth cap, `4`
+`BATON_RELAY_MODEL` is an optional model override for either built-in receiver. The
+baton's `teaching` or `brief` tier still controls document detail only; it never picks a
+provider or model.
+
+Relay exits are stable: `1` no baton, `2` invalid or ambiguous relay settings, `3` depth cap, `4`
 manual fallback required, `5` unsafe or invalid baton, `6` session collision, and `7`
 backend launch failure.
 
-**Two things park a successor before it does any work**, and `--spawn` warns about both:
+Interactive receivers can park before doing work, and `--spawn` prints a
+`WILL WAIT FOR YOU:` warning when that is possible:
 
-1. **Folder trust is per-directory.** The child stops at Claude Code's *"Is this a
+1. **Claude folder trust is per-directory.** The child stops at Claude Code's *"Is this a
    project you trust?"* prompt before it reads the baton. Running `claude` from a parent
    directory does **not** trust a subdirectory. One Enter, once per project.
-2. **Without a permission mode, an interactive successor may stall at the first approval prompt.** Set
+2. **An interactive receiver may stall at login or an approval prompt.** For Claude, set
    `BATON_RELAY_PERMISSION_MODE=acceptEdits` for an unattended relay. Unset is the
-   default, because a relay that waits is safer than one that doesn't.
+   default. For Codex, use its explicit sandbox and approval controls above. A relay
+   that waits visibly is safer than one that waits invisibly.
 
 ## What was measured, and what did not hold
 
@@ -145,7 +179,8 @@ So claim only what is shown:
 - The §2 invariant check makes a receiver **halt on stale state**. The stale arm halts
   with zero edits, every time; prose has no equivalent.
 - The format is **mechanically lintable and gate-able** (`evals/lint_baton.py`).
-- The relay works end to end, including unattended.
+- The Claude adapter has worked end to end, including unattended. Each other adapter
+  needs its own live receipt; offline command construction is not a substitute.
 
 It is **not** established that the baton format improves weak-model comprehension. That
 was tested fairly and the result was null. The eval is in this repo so you can rerun it.
@@ -165,7 +200,7 @@ skill/                   the /baton skill (SKILL.md, templates, status script)
 hooks/baton_gate.py      context meter, nag, Stop gate, pickup announcer
 hooks/baton_status.py    portable JSON status
 scripts/baton_next.py    cross-platform relay core
-install.py               cross-platform installer
+install.py               cross-platform Codex/Claude installer
 evals/                   linter, fixtures, receiver grader, the null-result eval
 ```
 

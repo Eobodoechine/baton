@@ -3,12 +3,9 @@ name: baton
 description: >
   Session handoff. Cuts a "baton" — a small, self-contained document that lets a
   fresh, contextless session (possibly a different model or platform) continue this work
-  exactly where it stopped. Also picks up a baton left by a previous session.
-when_to_use: >
-  Use when a session is ending, running long, or crossing the context threshold and
-  the work is not finished. Triggers on: "cut a baton", "/baton", "hand off this
-  session", "write a handoff", "pick up the baton", "continue where we left off",
-  or when a BATON DUE notice appears in context.
+  exactly where it stopped. Also picks up a baton left by a previous session. Use when
+  a session is ending or running long and work is unfinished, or when asked to cut,
+  hand off, pick up, or continue a baton.
 allowed-tools: Read, Bash, Write
 ---
 
@@ -124,11 +121,34 @@ if it exists. Copy the baton to `<root>/.baton/archive/baton_YYYY-MM-DD_<topic>.
 write its absolute path into `<root>/.baton/BATON_CURRENT`, and append a line to
 `<root>/.baton/batons.log`.
 
-**STEP 5 — Hand over by starting the successor.** Run
-`python <BASE_DIR>/scripts/baton_next.py --spawn`. The detail tier never chooses a
-model. The successor inherits the configured model unless `BATON_RELAY_MODEL` is set.
-With tmux it launches an attachable session; without tmux it uses a detached headless
-backend only when `BATON_RELAY_PERMISSION_MODE` is explicitly set.
+**STEP 5 — Hand over by starting the successor.** The detail tier never chooses a
+provider or model. The successor inherits its provider's configured model unless
+`BATON_RELAY_MODEL` is set.
+
+Choose the adapter for the surface running this skill:
+
+If this session's pickup prompt says `Baton relay generation N`, add
+`--parent-generation N` to the relay or manifest command below. A human-started
+session omits it and begins a fresh bounded chain.
+
+- **Codex Desktop:** if the app's task-creation capability is available, run
+  `python <BASE_DIR>/scripts/baton_next.py --manifest --provider codex` first. Parse
+  the JSON only after exit 0. Match its exact `root` to a saved local Codex project,
+  then create a new task in that same local checkout using the manifest's exact
+  `prompt`. Do not create a worktree: `.baton/` is intentionally ignored and would be
+  missing there. Say the successor started only after task creation returns a task ID.
+  If no exact saved project exists, use the Codex CLI path below; do not invent one.
+- **Codex CLI:** run
+  `python <BASE_DIR>/scripts/baton_next.py --spawn --provider codex`.
+- **Claude Code:** run
+  `python <BASE_DIR>/scripts/baton_next.py --spawn --provider claude`.
+- **Another receiver:** use `--provider custom` with the explicit JSON argv controls
+  documented in `<BASE_DIR>/README.md`.
+
+With tmux the CLI path launches an attachable session. Without tmux, Codex uses its
+non-interactive `codex exec` surface; Claude uses a detached headless backend only when
+`BATON_RELAY_PERMISSION_MODE` is explicitly set; custom receivers need an explicit
+headless argv.
 
 Report the backend, relay generation, and either the `tmux attach` line or the detached
 PID and log path. Say that the successor is running only after exit 0.
@@ -143,16 +163,16 @@ headless relay is never started without an explicit permission mode.
 |---|---|---|
 | 0 | spawned | session name + `tmux attach -t <name>` |
 | 1 | no baton on disk | the cut did not land; do not retry blindly, find out why |
-| 2 | invalid root or relay settings | correct the named setting; do not guess |
+| 2 | invalid root, provider choice, or relay settings | correct the named setting; do not guess |
 | 3 | relay depth cap hit | the chain stopped on purpose; it printed the manual command |
 | 4 | safe manual fallback required | it printed the command; the user starts it by hand |
 | 5 | unsafe pointer or invalid baton | **fix the baton** — do not force the spawn |
 | 6 | session name collision | a successor is already running; do not spawn a second |
 | 7 | launch backend failed | report the exact error and log path; do not claim it started |
 
-Never work around a refusal by invoking `claude` directly. Each exit above is a
-deliberate stop, and exit 5 in particular means an unattended session was about to
-inherit a half-written document.
+Never work around a refusal by invoking an agent directly with an unvalidated prompt.
+Each exit above is a deliberate stop, and exit 5 in particular means an unattended
+session was about to inherit a half-written document.
 
 ---
 

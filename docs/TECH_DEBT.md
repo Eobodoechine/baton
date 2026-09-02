@@ -29,8 +29,9 @@ runtime SHA without modifying either checkout.
 
 ### Phase 2 — live platform receipts
 
-Run the manual release matrix in `docs/TESTING.md` and retain host, Python, Git, Claude,
-backend, command, exit code, and log location. Keep live acceptance distinct from CI.
+Run the manual release matrix in `docs/TESTING.md` and retain host, Python, Git,
+receiver, backend, task/session ID, command, exit code, and log location. Keep live
+acceptance distinct from CI.
 
 ### Phase 3 — calibration and research
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Cross-platform Baton installer (Python 3.9+, standard library only)."""
+"""Cross-platform, multi-agent Baton installer (Python 3.9+)."""
 
+import argparse
 import json
 import hashlib
 import os
@@ -93,13 +94,35 @@ def hook_config(repo, executable=None, windows=None):
     }}
 
 
-def install(repo=None, home=None, skills_dir=None, output=None):
+def _skills_dir(agent, home):
+    if agent == "codex":
+        return Path(os.environ.get("CODEX_SKILLS_DIR", home / ".codex" / "skills"))
+    if agent == "claude":
+        return Path(os.environ.get("CLAUDE_SKILLS_DIR", home / ".claude" / "skills"))
+    raise ValueError("agent must be 'codex' or 'claude'")
+
+
+def detect_agents(home=None):
+    """Return every locally detectable supported agent, in neutral order."""
+    home = Path(home or Path.home()).resolve()
+    detected = []
+    for agent in ("codex", "claude"):
+        if (home / (".%s" % agent)).exists() or shutil.which(agent):
+            detected.append(agent)
+    return detected
+
+
+def install(repo=None, home=None, skills_dir=None, output=None, agent=None):
     output = output or sys.stdout
     repo = Path(repo or Path(__file__).resolve().parent).resolve()
     home = Path(home or Path.home()).resolve()
     source = repo / "skill"
-    skills = Path(skills_dir or os.environ.get(
-        "CLAUDE_SKILLS_DIR", home / ".claude" / "skills")).expanduser()
+    if skills_dir is None:
+        if agent not in ("codex", "claude"):
+            raise ValueError("choose agent='codex' or agent='claude'")
+        skills = _skills_dir(agent, home).expanduser()
+    else:
+        skills = Path(skills_dir).expanduser()
     destination = skills / "baton"
     skills.mkdir(parents=True, exist_ok=True)
 
@@ -147,18 +170,52 @@ def install(repo=None, home=None, skills_dir=None, output=None):
     return destination, method
 
 
-def main():
+def _requested_agents(values, home):
+    if not values:
+        detected = detect_agents(home)
+        if detected:
+            return detected
+        raise ValueError(
+            "could not detect Codex or Claude Code; rerun with --agent codex or "
+            "--agent claude")
+    expanded = []
+    for value in values:
+        names = ("codex", "claude") if value == "all" else (value,)
+        for name in names:
+            if name not in expanded:
+                expanded.append(name)
+    return expanded
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Install the Baton skill")
+    parser.add_argument(
+        "--agent", action="append", choices=("codex", "claude", "all"),
+        help="install target; repeat or use 'all' (default: detect installed agents)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     try:
         repo = Path(__file__).resolve().parent
-        install(repo=repo)
-    except (FileExistsError, OSError) as exc:
+        home = Path.home().resolve()
+        agents = _requested_agents(args.agent, home)
+        for agent in agents:
+            install(repo=repo, home=home, agent=agent)
+    except (FileExistsError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print("\nOptional hook configuration. Merge this object into your Claude Code settings:")
-    print("--- BEGIN BATON HOOK JSON ---")
-    print(json.dumps(hook_config(repo), indent=2, sort_keys=True))
-    print("--- END BATON HOOK JSON ---")
-    print("\nRun the relay with Python on any platform. tmux is optional; see README.md.")
+    print("\nInstalled for: %s" % ", ".join(agents))
+    if "claude" in agents:
+        print("\nOptional Claude Code hook configuration. Merge this object into "
+              "your Claude Code settings:")
+        print("--- BEGIN BATON HOOK JSON ---")
+        print(json.dumps(hook_config(repo), indent=2, sort_keys=True))
+        print("--- END BATON HOOK JSON ---")
+    print("\nRun the receiver-neutral relay with Python on any platform. "
+          "tmux is optional; see README.md.")
     return 0
 
 

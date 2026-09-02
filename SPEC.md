@@ -252,8 +252,11 @@ The model's own estimate of its context usage is unreliable and is never used.
 ## 6. Automation
 
 `hooks/baton_gate.py` is argv-flag dispatched and may be registered in
-`~/.claude/settings.json`. `install.py` prints guarded commands for the current
-platform; hooks remain optional.
+`~/.claude/settings.json`. These lifecycle hooks are a Claude Code adapter, not part of
+the Baton document contract. Codex and other receivers remain fully functional through
+the installed skill and manual status/cut/pickup flow. `install.py` prints guarded
+commands for the current platform when Claude is an install target; hooks remain
+optional.
 
 > **Trap:** `~/.claude/hooks/{session_init,user_prompt_submit,pre_tool_use}.py` are
 > inert duplicates. Nothing references them; the live copies run from the model-router
@@ -290,36 +293,49 @@ that as a *blocking* error, wedging a tool call. Caught in the wild 2026-08-25.
 
 ### The relay (`python scripts/baton_next.py --spawn`)
 
-**Superseded 2026-08-26.** This spec previously said spawning the successor could not be
-automated. That is true only of spawning a session *inside* Claude Code's own process. A
-skill step can start an external `claude`. The relay core is Python 3.9+ so validation,
-path containment, quoting, and exit codes are shared across macOS, Linux, and Windows.
-When tmux exists, `--spawn` launches an attachable session. Without tmux, it launches a
-detached headless receiver only when an explicit permission mode is configured.
+**Superseded 2026-09-01.** This spec once equated relay with starting an external
+`claude`. Relay is a receiver-neutral operation. The core now has built-in Codex and
+Claude Code adapters, a shell-free custom argv adapter, and a validated JSON manifest
+for host applications such as Codex Desktop. The relay core is Python 3.9+ so
+validation, path containment, quoting, and exit codes are shared across macOS, Linux,
+and Windows. When tmux exists, CLI `--spawn` launches an attachable session. Without
+tmux, the adapter must expose a non-interactive path that cannot wait invisibly.
 
 The relay is wired to **`/baton cut` STEP 5 only**. Session `Stop` does not relay. A
 session hands off when a cut was actually asked for, never as a side effect of ending.
 
 | Control | Default | Purpose |
 |---|---|---|
+| `BATON_RELAY_PROVIDER` | `auto` | `codex`, `claude`, `custom`, or `auto`. Auto selects only when exactly one built-in receiver is installed; it never silently prefers a vendor. |
 | `BATON_RELAY_GEN` | unset | Set by the spawner on the child. Absent means human-started, i.e. generation 0. |
 | `BATON_RELAY_MAX_GEN` | `5` | Chain depth cap. At the cap `--spawn` refuses and prints the manual command. |
-| `BATON_RELAY_PERMISSION_MODE` | unset | Passed through to `--permission-mode` when set. |
+| `BATON_RELAY_MODEL` | unset | Optional model override passed to either built-in receiver. |
+| `BATON_RELAY_PERMISSION_MODE` | unset | Claude adapter only; passed through to `--permission-mode`. Required for detached Claude. |
+| `BATON_RELAY_SANDBOX` | unset | Codex adapter only; `read-only`, `workspace-write`, or `danger-full-access`. Unset preserves Codex's read-only non-interactive default. |
+| `BATON_RELAY_APPROVAL_POLICY` | unset | Codex adapter only; `untrusted`, `on-request`, or `never`. |
+| `BATON_RELAY_COMMAND_JSON` | unset | Custom interactive argv as a JSON string array. Exact `{root}`, `{baton}`, and `{prompt}` tokens are replaced without invoking a shell. |
+| `BATON_RELAY_HEADLESS_COMMAND_JSON` | unset | Custom non-interactive argv; required before a custom receiver may detach without tmux. |
 
 Generation is carried in the child's environment, not on disk, so it **self-resets**: a
 human-started session is always generation 0 and cannot inherit a stale counter.
 
 `--spawn` **refuses rather than guesses**, with distinct exit codes: `1` no baton, `2`
-invalid settings, `3` depth cap, `4` safe manual fallback required, `5` unsafe pointer
+invalid settings or ambiguous provider, `3` depth cap, `4` safe manual fallback required, `5` unsafe pointer
 or invalid baton, `6` session collision, and `7` backend failure. Every mode runs the
 structural linter before starting or printing a receiver command. Each successful spawn
 appends a backend-labelled line to `.baton/batons.log`; detached output goes to
 `.baton/relay/<session>.log`.
 
-The relay does not weaken the architectural rule. It **starts a model and points it at a
-file a model wrote**; it never generates baton prose.
+The relay does not weaken the architectural rule. It **starts a receiver and points it
+at a file a model wrote**; it never generates baton prose.
 
-**Live-tested 2026-08-26** (scratch repo, `claude-haiku-4-5` receiver, real sessions).
+`--manifest --provider <name>` runs the same pointer, linter, ownership, settings, and
+depth checks and emits a JSON object containing the exact root, baton path, prompt, and
+generation. A host app may use that manifest to create a visible task. The host must
+claim success only after it receives a task identifier. App-hosted receivers carry the
+generation in the prompt and pass it back with `--parent-generation` on the next cut.
+
+**Claude adapter live-tested 2026-08-26** (scratch repo, `claude-haiku-4-5` receiver, real sessions).
 The successor read the baton, ran the §2 invariant check *before* anything else, executed
 §3, self-verified, and honoured "do not cut a baton". Two blockers surfaced that no dry
 run would have shown, and `--spawn` now warns about both:
@@ -329,10 +345,12 @@ run would have shown, and `--spawn` now warns about both:
    does **not** trust the child directory — `Claude/Projects/ai-os` had
    `hasTrustDialogAccepted: false` while `~` had `true`. Cost is one Enter, once per
    project, forever.
-2. **Without a permission mode an interactive successor can stall at the first approval
-   prompt.** A headless fallback is therefore never detached unless
-   `BATON_RELAY_PERMISSION_MODE` is explicitly set. Otherwise exit 4 prints the manual
-   command.
+2. **An interactive successor can stall at login, trust, or approval.** The relay emits
+   an attach warning for interactive providers. A Claude headless fallback is never
+   detached unless `BATON_RELAY_PERMISSION_MODE` is explicitly set. Codex uses the
+   supported non-interactive `codex exec` surface and preserves its read-only default
+   unless the user explicitly chooses another sandbox. A custom receiver detaches only
+   when a separate headless argv is configured.
 
 Trust is recorded in `~/.claude.json` under the **realpath** of the root
 (`/private/tmp/...`, not `/tmp/...`), so `--spawn` normalises the root before both the
