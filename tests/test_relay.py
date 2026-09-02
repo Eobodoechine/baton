@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -79,6 +80,16 @@ def run(root, *args, env=None):
         [sys.executable, str(RELAY), *args], cwd=root, env=merged,
         capture_output=True, text=True,
     )
+
+
+def isolated_posix_bin(tmp_path):
+    """Return a PATH with Git but without host-installed receivers or tmux."""
+    fake_bin = tmp_path / "isolated-bin"
+    fake_bin.mkdir()
+    git = shutil.which("git")
+    assert git is not None
+    (fake_bin / "git").symlink_to(git)
+    return fake_bin
 
 
 def test_claude_headless_prints_a_shell_escaped_command(tmp_path):
@@ -160,8 +171,9 @@ def test_spawn_uses_fake_tmux_and_never_starts_a_real_model(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="PATH isolation fixture is POSIX-only")
 def test_spawn_without_tmux_refuses_an_invisible_wait(tmp_path):
     root = project(tmp_path)
+    fake_bin = isolated_posix_bin(tmp_path)
     result = run(root, "--spawn", "--provider", "claude",
-                 env={"PATH": "/usr/bin:/bin"})
+                 env={"PATH": str(fake_bin)})
     assert result.returncode == 4
     assert "refusing to detach" in result.stderr
     assert "claude" in result.stdout
@@ -179,8 +191,9 @@ def test_relay_tests_ignore_parent_session_controls(tmp_path, monkeypatch):
     monkeypatch.setenv("BATON_RELAY_COMMAND_JSON", '["parent-agent"]')
     monkeypatch.setenv("BATON_RELAY_HEADLESS_COMMAND_JSON", '["parent-headless"]')
     root = project(tmp_path)
+    fake_bin = isolated_posix_bin(tmp_path)
     result = run(root, "--spawn", "--provider", "claude",
-                 env={"PATH": "/usr/bin:/bin"})
+                 env={"PATH": str(fake_bin)})
     assert result.returncode == 4
     assert "refusing to detach" in result.stderr
 
@@ -188,13 +201,12 @@ def test_relay_tests_ignore_parent_session_controls(tmp_path, monkeypatch):
 @pytest.mark.skipif(os.name == "nt", reason="fake executable fixture is POSIX-only")
 def test_spawn_without_tmux_can_use_explicit_headless_backend(tmp_path):
     root = project(tmp_path)
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
+    fake_bin = isolated_posix_bin(tmp_path)
     claude = fake_bin / "claude"
     claude.write_text("#!/bin/sh\necho fake-claude-finished\n")
     claude.chmod(0o755)
     result = run(root, "--spawn", "--provider", "claude", env={
-        "PATH": str(fake_bin) + ":/usr/bin:/bin",
+        "PATH": str(fake_bin),
         "BATON_RELAY_PERMISSION_MODE": "acceptEdits",
     })
     assert result.returncode == 0, result.stderr
@@ -206,13 +218,12 @@ def test_spawn_without_tmux_can_use_explicit_headless_backend(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="fake executable fixture is POSIX-only")
 def test_codex_can_use_safe_noninteractive_backend_without_tmux(tmp_path):
     root = project(tmp_path)
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
+    fake_bin = isolated_posix_bin(tmp_path)
     codex = fake_bin / "codex"
     codex.write_text("#!/bin/sh\necho fake-codex-finished\n")
     codex.chmod(0o755)
     result = run(root, "--spawn", "--provider", "codex", env={
-        "PATH": str(fake_bin) + ":/usr/bin:/bin",
+        "PATH": str(fake_bin),
         "BATON_RELAY_SANDBOX": "workspace-write",
         "BATON_RELAY_APPROVAL_POLICY": "never",
     })
@@ -227,13 +238,12 @@ def test_codex_can_use_safe_noninteractive_backend_without_tmux(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="fake executable fixture is POSIX-only")
 def test_auto_provider_selects_the_only_installed_receiver(tmp_path):
     root = project(tmp_path)
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
+    fake_bin = isolated_posix_bin(tmp_path)
     codex = fake_bin / "codex"
     codex.write_text("#!/bin/sh\nexit 0\n")
     codex.chmod(0o755)
     result = run(root, "--print", env={
-        "PATH": str(fake_bin) + ":/usr/bin:/bin",
+        "PATH": str(fake_bin),
     })
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("codex -C ")
@@ -242,14 +252,13 @@ def test_auto_provider_selects_the_only_installed_receiver(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="fake executable fixture is POSIX-only")
 def test_auto_provider_refuses_to_guess_when_both_are_installed(tmp_path):
     root = project(tmp_path)
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
+    fake_bin = isolated_posix_bin(tmp_path)
     for name in ("codex", "claude"):
         executable = fake_bin / name
         executable.write_text("#!/bin/sh\nexit 0\n")
         executable.chmod(0o755)
     result = run(root, "--print", env={
-        "PATH": str(fake_bin) + ":/usr/bin:/bin",
+        "PATH": str(fake_bin),
     })
     assert result.returncode == 2
     assert "found both" in result.stderr
@@ -302,7 +311,8 @@ def test_invalid_codex_policy_fails_before_launch(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="PATH isolation fixture is POSIX-only")
 def test_auto_provider_reports_when_no_receiver_is_installed(tmp_path):
     root = project(tmp_path)
-    result = run(root, "--print", env={"PATH": "/usr/bin:/bin"})
+    fake_bin = isolated_posix_bin(tmp_path)
+    result = run(root, "--print", env={"PATH": str(fake_bin)})
     assert result.returncode == 7
     assert "found neither" in result.stderr
 
@@ -310,8 +320,9 @@ def test_auto_provider_reports_when_no_receiver_is_installed(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="PATH isolation fixture is POSIX-only")
 def test_custom_provider_without_headless_argv_refuses_detach(tmp_path):
     root = project(tmp_path)
+    fake_bin = isolated_posix_bin(tmp_path)
     result = run(root, "--spawn", "--provider", "custom", env={
-        "PATH": "/usr/bin:/bin",
+        "PATH": str(fake_bin),
         "BATON_RELAY_COMMAND_JSON": '["my-agent", "{prompt}"]',
     })
     assert result.returncode == 4

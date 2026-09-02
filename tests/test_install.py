@@ -52,7 +52,8 @@ def test_installer_prints_parseable_guarded_json_with_quoted_paths(tmp_path):
     config = hook_json(result.stdout)
     cmds = commands(config)
     assert len(cmds) == 6
-    assert all(command.startswith("if [ -f ") for command in cmds)
+    expected_guard = "if exist " if os.name == "nt" else "if [ -f "
+    assert all(command.startswith(expected_guard) for command in cmds)
     assert all(str(source / "hooks" / "baton_gate.py") in command for command in cmds)
     if os.name != "nt":
         for command in cmds:

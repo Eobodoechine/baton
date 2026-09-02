@@ -190,6 +190,9 @@ def project_root(start=None):
         )
     if not os.path.isabs(common):
         common = os.path.abspath(os.path.join(cur, common))
+    # Git commonly emits forward slashes on Windows. Normalize before deriving the
+    # owning clone so callers receive a native, comparable filesystem path.
+    common = os.path.normpath(common)
     if os.path.basename(common) == ".git":
         return os.path.dirname(common)
 
@@ -203,7 +206,7 @@ def project_root(start=None):
             capture_output=True, text=True, timeout=15,
         )
         if top.returncode == 0 and top.stdout.strip():
-            value = top.stdout.strip()
+            value = os.path.normpath(top.stdout.strip())
             return value if os.path.isabs(value) else os.path.abspath(
                 os.path.join(cur, value))
     raise BatonRootError(

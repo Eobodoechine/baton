@@ -11,9 +11,10 @@ import lint_baton as lint  # noqa: E402
 
 
 def valid_body():
+    example_repo = os.path.abspath(os.path.join(os.sep, "tmp", "example"))
     return """# BATON — test
 Detail tier: brief
-Repo: /tmp/example
+Repo: {example_repo}
 Card: .baton/PROJECT_CARD.md @ deadbeef
 Trust rule: verify this file against the repository.
 
@@ -38,7 +39,7 @@ none recorded
 
 ## 11. DONE MEANS
 python -m pytest exits zero. REPEAT: python -m pytest
-"""
+""".format(example_repo=example_repo)
 
 
 def write(tmp_path, body=None):
