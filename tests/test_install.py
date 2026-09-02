@@ -100,6 +100,8 @@ def test_installer_refuses_to_overwrite_an_existing_skill(tmp_path):
     )
     assert result.returncode == 1
     assert (destination / "owner-file").read_text() == "keep"
+    assert "outside" in result.stderr
+    assert "duplicate skills" in result.stderr
 
 
 def test_windows_hook_commands_are_guarded_and_quoted():
@@ -289,6 +291,8 @@ def test_batonctl_global_enable_disable_and_project_override(tmp_path):
     enabled = subprocess.run([sys.executable, str(ctl), "auto", "enable", "--agent", "codex"],
                              env=env, cwd=ROOT, capture_output=True, text=True)
     assert enabled.returncode == 0, enabled.stderr
+    assert "run /hooks" in enabled.stdout
+    assert "trusted and enabled" in enabled.stdout
     config = json.loads((runtime / "config.json").read_text())
     assert config["auto_handoff"] and config["agents"]["codex"]["enabled"]
     assert (home / ".codex" / "hooks.json").is_file()

@@ -48,8 +48,23 @@ python scripts/batonctl.py doctor --agent codex --json
 `auto enable` atomically merges only Baton-owned entries, retaining unrelated hooks and
 making a backup before its first write. `auto disable` leaves those inert entries in
 place; `batonctl hooks uninstall --agent ...` is the separate explicit removal command.
-Codex users must review and trust non-managed hooks with `/hooks`; `doctor` reports
-automation unverified until a hook has actually run.
+
+Codex requires a one-time trust review for non-managed hooks. After `auto enable`:
+
+1. Start a **new Codex session** in any Git checkout.
+2. Run `/hooks`.
+3. Open the user hook source `~/.codex/hooks.json` and review the Baton commands. Each
+   Baton command must point at the checkout where you installed Baton.
+4. Mark the Baton entries trusted and enabled. Codex binds trust to the current hook
+   definition, so repeat this review after a hook command changes.
+5. Run one harmless tool call, then run
+   `python scripts/batonctl.py doctor --agent codex --json`. `hook_runs_seen: true`
+   proves a Baton hook executed; `/hooks` remains the authority for persisted trust.
+
+Do not keep an old Baton skill under another name inside `~/.codex/skills/`: Codex
+indexes it as a second skill. Move backups outside the skills directory (for example,
+under `~/.baton/backups/`) or remove them after confirming `~/.codex/skills/baton`
+points at the intended checkout.
 
 Then, in any project, ask the installed skill to run one of these actions:
 
@@ -134,14 +149,17 @@ commit.
 
 | Environment | Automatic result | Current acceptance status |
 |---|---|---|
-| Codex Desktop | Visible successor task in the same saved checkout | not live verified |
-| Codex CLI | One successor CLI/tmux session plus receipt | not live verified |
-| Claude Code | One successor CLI/tmux session plus receipt | not live verified |
-| Custom adapter | One deduplicated launch after implementing the contract below | fake/offline only |
-| Unsupported backend | Validated baton plus one exact manual command | offline covered |
+| Codex Desktop | Visible successor task in the same saved checkout | **verified on macOS** (task-ID receipt) |
+| Codex CLI | One successor CLI/tmux session plus receipt | **verified on macOS** (tmux receipt) |
+| Claude Code | One successor CLI/tmux session plus receipt | **verified on macOS** (tmux receipt) |
+| Custom adapter | One deduplicated launch after implementing the contract below | **verified on macOS** with a fake argv adapter and real tmux |
+| Unsupported backend | Validated baton plus one exact manual command | **verified on macOS** with no launch and no success receipt |
 
-“Verified” is deliberately absent until a fresh live receipt exists for that host and
-operating system. CI is offline and never invokes a paid receiver.
+These entries were accepted on macOS on 2026-09-02. They do not claim native Linux or
+Windows live acceptance; the cross-platform CI contract remains separate. CI is
+offline and never invokes a paid receiver. A host/OS combination moves to **verified**
+only after it produces a fresh matching receipt and the successor proves it read and
+verified the baton before editing.
 
 ### The relay
 

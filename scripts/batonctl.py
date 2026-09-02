@@ -45,9 +45,17 @@ def _auto(args):
     runtime.write_config(config)
     if args.action == "enable":
         import install  # noqa: WPS433 (local checkout module)
-        for host in _agents(args.agent):
+        enabled_hosts = _agents(args.agent)
+        for host in enabled_hosts:
             install.merge_host_hooks(BASE_DIR, host, home=_host_home())
-        print("automatic handoff enabled for: %s" % ", ".join(_agents(args.agent)))
+        print("automatic handoff enabled for: %s" % ", ".join(enabled_hosts))
+        if "codex" in enabled_hosts:
+            print(
+                "Codex trust step: start a new Codex session, run /hooks, review the "
+                "Baton commands from ~/.codex/hooks.json, and mark those entries "
+                "trusted and enabled. Then run one harmless tool call and check "
+                "`python scripts/batonctl.py doctor --agent codex --json`."
+            )
     else:
         print("automatic handoff disabled for: %s (hook wiring retained)" %
               ", ".join(_agents(args.agent)))
@@ -88,8 +96,12 @@ def _doctor(args):
         "hook_runs_seen": bool(states),
         "automation_verified": bool(states),
         "last_errors": errors,
-        "note": ("Codex hooks must be reviewed/trusted with /hooks before they run."
-                 if host == "codex" else "Automation is unverified until a hook runs."),
+        "note": (
+            "Use /hooks in a new Codex session to review and trust/enable each Baton "
+            "entry from ~/.codex/hooks.json. hook_runs_seen proves at least one hook "
+            "ran; /hooks is the authority for persisted trust."
+            if host == "codex" else "Automation is unverified until a hook runs."
+        ),
     }
     print(json.dumps(result, sort_keys=True))
     return 0

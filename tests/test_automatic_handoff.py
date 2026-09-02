@@ -115,19 +115,58 @@ def test_claude_percentage_threshold_unavailable_data_and_stuck_detection(tmp_pa
     assert runtime.read_state("claude", "unavailable")["trigger_reason"].startswith("stuck:")
 
 
+def test_repeated_baton_state_verification_does_not_trigger_recursive_handoff(tmp_path, monkeypatch):
+    root = project(tmp_path)
+    enable(monkeypatch, tmp_path)
+    payload = {
+        "session_id": "receiver",
+        "cwd": str(root),
+        "_baton_host": "codex",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "python3 %s/scripts/batonctl.py verify-state --root %s --baton %s/.baton/BATON.md"
+            % (root, root, root)
+        },
+    }
+    for _ in range(gate.STUCK_REPEATS):
+        gate.mode_meter(dict(payload))
+    state = runtime.read_state("codex", "receiver")
+    assert state["phase"] == "observing"
+    assert state["recent"] == []
+
+
+def test_claude_bash_description_does_not_hide_identical_command(tmp_path, monkeypatch):
+    root = project(tmp_path)
+    enable(monkeypatch, tmp_path, host="claude")
+    for index in range(gate.STUCK_REPEATS):
+        gate.mode_meter({
+            "session_id": "claude-labels",
+            "cwd": str(root),
+            "_baton_host": "claude",
+            "tool_name": "Bash",
+            "tool_input": {"command": "pwd", "description": "call %d of 3" % (index + 1)},
+        })
+    state = runtime.read_state("claude", "claude-labels")
+    assert state["phase"] == "due"
+    assert state["trigger_reason"].startswith("stuck:")
+
+
 def test_precompact_drives_due_stop_to_receipt_completion(tmp_path, monkeypatch, capsys):
     root = project(tmp_path)
     enable(monkeypatch, tmp_path)
     payload = {"session_id": "codex-session", "turn_id": "turn-1", "cwd": str(root),
                "_baton_host": "codex", "stop_hook_active": True}
     assert gate.mode_compact_marker(payload) == 0
-    assert gate.mode_gate(payload) == 2
-    assert "cut action" in capsys.readouterr().out
+    assert gate.mode_gate(payload) == 0
+    continuation = json.loads(capsys.readouterr().out)
+    assert continuation["decision"] == "block"
+    assert "cut action" in continuation["reason"]
 
     baton = valid_baton(root)
-    assert gate.mode_gate(payload) == 2
-    output = capsys.readouterr().out
-    assert "Do not rewrite the baton" in output
+    assert gate.mode_gate(payload) == 0
+    continuation = json.loads(capsys.readouterr().out)
+    assert continuation["decision"] == "block"
+    assert "Do not rewrite the baton" in continuation["reason"]
     state = runtime.read_state("codex", "codex-session")
     info = gate._baton_launch_info(str(root), state, "codex")
     runtime.record_receipt(info["handoff_id"], "codex", "fake", task_id="task-123")
@@ -144,10 +183,12 @@ def test_stop_caps_at_three_continuations_then_prints_manual_command(tmp_path, m
     enable(monkeypatch, tmp_path)
     payload = {"session_id": "limit", "cwd": str(root), "_baton_host": "codex"}
     gate.mode_compact_marker(payload)
-    assert [gate.mode_gate(payload) for _ in range(4)] == [2, 2, 2, 0]
+    assert [gate.mode_gate(payload) for _ in range(4)] == [0, 0, 0, 0]
     state = runtime.read_state("codex", "limit")
     assert state["phase"] == "manual_required"
-    assert "baton_next.py --spawn --provider codex" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert output.count('"decision": "block"') == 3
+    assert "baton_next.py --spawn --provider codex" in output
 
 
 def test_project_override_suppresses_automatic_state(tmp_path, monkeypatch):

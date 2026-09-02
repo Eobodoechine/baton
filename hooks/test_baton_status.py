@@ -16,6 +16,12 @@ import baton_gate as bg  # noqa: E402
 import baton_status as status  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def isolate_baton_runtime(tmp_path, monkeypatch):
+    """Status tests must not count a developer's live automatic-handoff state."""
+    monkeypatch.setenv("BATON_HOME", str(tmp_path / "baton-home"))
+
+
 def make_project(tmp_path, name="project"):
     root = tmp_path / name
     root.mkdir()

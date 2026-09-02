@@ -176,6 +176,33 @@ def test_meter_flags_three_identical_tool_calls_as_stuck(tmp_path, gate):
     assert "stuck:" in (gate / "s3_baton_due").read_text()
 
 
+def test_meter_ignores_repeated_baton_state_verification(tmp_path, gate):
+    t = transcript(tmp_path, input_tokens=1000)
+    payload = {
+        "session_id": "receiver",
+        "transcript_path": t,
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "python3 /opt/baton/scripts/batonctl.py verify-state --root /repo --baton /repo/.baton/BATON.md"
+        },
+    }
+    for _ in range(bg.STUCK_REPEATS):
+        bg.mode_meter(dict(payload))
+    assert not os.path.exists(gate / "receiver_baton_due")
+
+
+def test_meter_ignores_bash_description_when_command_is_identical(tmp_path, gate):
+    t = transcript(tmp_path, input_tokens=1000)
+    for index in range(bg.STUCK_REPEATS):
+        bg.mode_meter({
+            "session_id": "claude-labels",
+            "transcript_path": t,
+            "tool_name": "Bash",
+            "tool_input": {"command": "pwd", "description": "call %d of 3" % (index + 1)},
+        })
+    assert "stuck:" in (gate / "claude-labels_baton_due").read_text()
+
+
 def test_meter_does_not_flag_varied_tool_calls(tmp_path, gate):
     t = transcript(tmp_path, input_tokens=1000)
     for i in range(6):

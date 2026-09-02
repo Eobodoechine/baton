@@ -58,9 +58,12 @@ shellcheck install.sh scripts/baton_next.sh skill/scripts/baton_status.sh evals/
 
 Before calling a release portable, record each result separately:
 
-1. Codex Desktop: trigger the three-identical-tool detector, allow Stop continuation,
-   verify one visible successor in the same checkout reads the baton first, then retain
-   its returned task-ID receipt.
+1. Codex Desktop: after `auto enable`, start a new session, use `/hooks` to review and
+   trust/enable the Baton entries from `~/.codex/hooks.json`, and run one harmless tool
+   call. Confirm `doctor --agent codex --json` reports `hook_runs_seen: true`; then
+   trigger the three-identical-tool detector, allow Stop continuation, verify one
+   visible successor in the same checkout reads the baton first, and retain its
+   returned task-ID receipt.
 2. Codex CLI: repeat and retain exactly one successor process/session receipt.
 3. Claude Code: repeat and retain exactly one successor tmux/headless receipt.
 4. Custom adapter: run the same handoff twice and prove it launches once.
@@ -73,3 +76,17 @@ Before calling a release portable, record each result separately:
 
 Green offline CI is source-level portability evidence. It is not proof that a real
 Codex task, Claude session, tmux backend, or native Windows host completed a handoff.
+
+### Recorded live acceptance
+
+On macOS on 2026-09-02, the release candidate completed the Codex Desktop, Codex CLI,
+and Claude Code flows above with matching task/session receipts. Each real successor
+read the archived baton first, passed its literal repository-state verification, and
+made no source-file edit during the acceptance task. A fake custom argv adapter run
+twice through real tmux recorded one invocation and recovered the same receipt on the
+retry. With tmux removed from the disposable backend and no safe headless argv, the
+relay exited 4, printed the exact manual command, did not invoke the receiver, and did
+not create a success receipt.
+
+This is macOS evidence only. Record Linux and Windows separately before marking those
+host/OS combinations live verified.

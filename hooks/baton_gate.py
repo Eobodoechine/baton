@@ -118,6 +118,28 @@ def _emit_context(event_name, text):
     }))
 
 
+def _emit_stop_continuation(host, text):
+    """Ask the host to continue a Stop turn with *text* as the new prompt.
+
+    Claude Code accepts the longstanding exit-2 continuation convention.  Codex's
+    Stop contract is different: exit 0 must carry a JSON ``decision: block`` and
+    ``reason``; JSON ``additionalContext`` plus exit 2 is not a continuation prompt.
+    Keep this difference at the boundary so the state machine remains portable.
+    """
+    if host == "codex":
+        sys.stdout.write(json.dumps({"decision": "block", "reason": text}))
+    else:
+        _emit_context("Stop", text)
+
+
+def _emit_stop_manual_required(host, text):
+    """Surface the capped manual command without starting a fourth continuation."""
+    if host == "codex":
+        sys.stdout.write(json.dumps({"systemMessage": text}))
+    else:
+        _emit_context("Stop", text)
+
+
 def context_tokens(transcript_path):
     """Current context size from the newest assistant usage record.
 
@@ -471,6 +493,44 @@ def _mark_due(state, reason, tokens=0, window=0):
     state["context_window"] = window
 
 
+def _is_baton_state_verification(payload):
+    """Return true for Baton's deliberate, repeatable checkout invariant call.
+
+    A version-2 baton intentionally prints the same ``batonctl.py verify-state``
+    command in sections 1, 2, and 11.  Counting those three safety checks as a
+    stuck loop recursively hands the receiver to another receiver immediately
+    after a successful pickup.
+    """
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, dict):
+        command = tool_input.get("command", tool_input.get("cmd", ""))
+    else:
+        command = tool_input or ""
+    if isinstance(command, (list, tuple)):
+        command = " ".join(str(part) for part in command)
+    command = str(command)
+    return "batonctl.py" in command and "verify-state" in command
+
+
+def _stuck_signature(payload):
+    """Hash the operation, excluding host-added presentation metadata.
+
+    Claude's Bash tool may vary the descriptive label between executions of the
+    same command.  That label is not part of the operation and must not defeat
+    the cross-host stuck detector.
+    """
+    tool_name = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    if str(tool_name).lower() in ("bash", "shell", "exec_command") and isinstance(tool_input, dict):
+        if "command" in tool_input:
+            tool_input = {"command": tool_input["command"]}
+        elif "cmd" in tool_input:
+            tool_input = {"cmd": tool_input["cmd"]}
+    return hashlib.sha256(json.dumps(
+        [tool_name, tool_input], sort_keys=True, default=str,
+    ).encode("utf-8")).hexdigest()[:16]
+
+
 def _auto_meter(payload, host):
     try:
         root = _auto_root(payload)
@@ -499,12 +559,12 @@ def _auto_meter(payload, host):
             })
             # Persist the rolling signature even when the platform cannot report a
             # context window.  The three-call detector is an independent trigger.
-            signature = hashlib.sha256(json.dumps(
-                [payload.get("tool_name"), payload.get("tool_input")],
-                sort_keys=True, default=str,
-            ).encode("utf-8")).hexdigest()[:16]
+            signature = _stuck_signature(payload)
             recent = list(state.get("recent") or [])[-(STUCK_REPEATS - 1):]
-            recent.append(signature)
+            if _is_baton_state_verification(payload):
+                recent = []
+            else:
+                recent.append(signature)
             state["recent"] = recent
             if state.get("phase") not in ("launched", "manual_required"):
                 if (len(recent) == STUCK_REPEATS and len(set(recent)) == 1):
@@ -610,13 +670,14 @@ def _auto_stop(payload, host):
                 state.update({"phase": "manual_required", "last_error": "continuation limit reached",
                               "manual_command": _manual_command(host)})
                 _save_auto_state(host, session, state)
-                _emit_context("Stop", "BATON MANUAL REQUIRED: %s" % state["manual_command"])
+                _emit_stop_manual_required(
+                    host, "BATON MANUAL REQUIRED: %s" % state["manual_command"])
                 return 0
             state["continuation_attempts"] = attempts + 1
             _save_auto_state(host, session, state)
-            _emit_context("Stop", "%s (continuation %d/%d)" % (
+            _emit_stop_continuation(host, "%s (continuation %d/%d)" % (
                 instruction, attempts + 1, config["max_stop_attempts"]))
-            return 2
+            return 0 if host == "codex" else 2
     except (OSError, ValueError, RuntimeError) as exc:
         runtime.record_error(host, session, repr(exc))
         return 0
@@ -667,17 +728,17 @@ def mode_meter(payload):
     # Stuck detection: N consecutive byte-identical (tool_name, args) calls.
     state_path = _flag(session, "baton_state.json")
     try:
-        sig = hashlib.sha256(json.dumps(
-            [payload.get("tool_name"), payload.get("tool_input")],
-            sort_keys=True, default=str,
-        ).encode("utf-8")).hexdigest()[:16]
+        sig = _stuck_signature(payload)
         try:
             with open(state_path, "r", encoding="utf-8") as fh:
                 state = json.load(fh)
         except (OSError, ValueError):
             state = {}
         recent = state.get("recent", [])
-        recent.append(sig)
+        if _is_baton_state_verification(payload):
+            recent = []
+        else:
+            recent.append(sig)
         recent = recent[-STUCK_REPEATS:]
         state["recent"] = recent
         with open(state_path, "w", encoding="utf-8") as fh:

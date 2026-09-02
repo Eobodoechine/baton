@@ -268,11 +268,14 @@ def install(repo=None, home=None, skills_dir=None, output=None, agent=None):
                 print("updated marked copy: %s" % destination, file=output)
             else:
                 raise FileExistsError(
-                    "refusing to overwrite existing %s; move it aside first" %
-                    destination)
+                    "refusing to overwrite existing %s; remove it or move it outside "
+                    "%s first (Codex indexes renamed backups inside the skills "
+                    "directory as duplicate skills)" % (destination, skills))
         else:
             raise FileExistsError(
-                "refusing to overwrite existing %s; move it aside first" % destination)
+                "refusing to overwrite existing %s; remove it or move it outside %s "
+                "first (Codex indexes renamed backups inside the skills directory as "
+                "duplicate skills)" % (destination, skills))
     else:
         try:
             destination.symlink_to(source, target_is_directory=True)
