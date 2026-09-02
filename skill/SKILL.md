@@ -28,8 +28,9 @@ longer the goal — verifiability and explanation are.
 
 **STEP -1 — Load the contract (do this before anything else):**
 
-Read `~/.baton-config`. Extract its `base_dir=` line (expand `~`) as `BASE_DIR`.
-If the file does not exist, resolve this installed skill: a symlink points into
+Read `~/.baton/config.json` first. Its `base_dir` is `BASE_DIR`; `~/.baton-config`
+is a one-major-release fallback. `BATON_HOME` is only a test/advanced override. If
+neither config exists, resolve this installed skill: a symlink points into
 `<BASE_DIR>/skill`; a copied installation has `.baton-install.json` whose `source`
 points there. If neither identifies a checkout, use the local templates only and say
 that status, lint, and relay are unavailable. Never guess a base directory.
@@ -58,13 +59,14 @@ Branch on it. `root` is the project root; the two layers live at
 
 **STEP 1 — Run the pre-termination checklist.** Do not cut mid-flight.
 
-- No pending tool calls.
-- No background processes owned by this session.
-- No uncommitted changes (commit first — the receiver's invariant check pins a SHA).
+- No unfinished foreground tool call.
+- Record background processes as state; do not kill them.
+- Capture dirty worktree state in the version-2 fingerprint. Never create an automatic
+  WIP commit.
 - No question from the user still unanswered.
 
-If any fails, resolve it first. A baton cut over a dirty tree hands the receiver a
-state it cannot verify.
+If a foreground call or user question is still open, resolve it first. A dirty tree is
+safe only when the fingerprint below describes it exactly.
 
 **STEP 2 — Ensure the card exists.** If `<root>/.baton/PROJECT_CARD.md` is missing,
 build it from `templates/project_card.md` using the applicable repository instruction
@@ -77,10 +79,14 @@ If the card exists but you violated or discovered a standing rule this session, 
 so and offer `card` (below). Do not silently edit it.
 
 **STEP 3 — Write `<root>/.baton/BATON.md`** from `templates/baton.md`, following the
-schema in `SPEC.md`. Include `Repo: <absolute owning repository path>` in the header.
+schema in `SPEC.md`. Include `Repo: <absolute exact checkout path>` in the header.
 Budget: **5,000 tokens** (`--tier teaching`, the default,
 which includes §10 Decisions + Why) or **2,500** (`--tier brief`, §10 omitted, for a
-task that genuinely is small).
+task that genuinely is small). New cuts MUST include `Baton-Version: 2`, the current
+40-character `Head`, `Worktree: clean|dirty`, and a `Worktree-Fingerprint:
+sha256:<64 hex>` header. Obtain the last three values by running
+`python <BASE_DIR>/scripts/batonctl.py snapshot --root <root>` immediately before
+writing the baton; `.baton/` is excluded from this fingerprint.
 
 Tiers are detail budgets, **not** model classes — a tier never picks a model. Write so
 that any receiver, any model, any intelligence with no shared history, can both execute
@@ -118,12 +124,14 @@ task. Do not copy the card wholesale; that is the whole point of having two laye
 Under budget pressure, trim in this order: §10, §7, §9, §8. Never trim §1–§6 or §11.
 
 **STEP 4 — Verify and archive.** Run
-`python <BASE_DIR>/evals/lint_baton.py <root>/.baton/BATON.md`
-if it exists. Copy the baton to `<root>/.baton/archive/baton_YYYY-MM-DD_<topic>.md`,
+`python <BASE_DIR>/evals/lint_baton.py <root>/.baton/BATON.md` and
+`python <BASE_DIR>/scripts/batonctl.py verify-state --root <root> --baton
+<root>/.baton/BATON.md`; both must exit 0. Copy the baton to
+`<root>/.baton/archive/baton_YYYY-MM-DD_<topic>.md`,
 write its absolute path into `<root>/.baton/BATON_CURRENT`, and append a line to
 `<root>/.baton/batons.log`.
 
-**STEP 5 — Hand over by starting the successor.** The detail tier never chooses a
+**STEP 5 — Hand over by starting the successor and recording its receipt.** The detail tier never chooses a
 provider or model. The successor inherits its provider's configured model unless
 `BATON_RELAY_MODEL` is set.
 
@@ -137,8 +145,11 @@ session omits it and begins a fresh bounded chain.
   `python <BASE_DIR>/scripts/baton_next.py --manifest --provider codex` first. Parse
   the JSON only after exit 0. Match its exact `root` to a saved local Codex project,
   then create a new task in that same local checkout using the manifest's exact
-  `prompt`. Do not create a worktree: `.baton/` is intentionally ignored and would be
-  missing there. Say the successor started only after task creation returns a task ID.
+  `prompt`. Do not create a worktree: dirty automatic handoffs reuse this checkout.
+  Search existing visible tasks for the exact `handoff_id` first; create only if absent,
+  then run the manifest's `receipt_recording_argv`, replacing only `{task_id}` with the
+  returned task ID. Say the
+  successor started only after that receipt exists.
   If no exact saved project exists, use the Codex CLI path below; do not invent one.
 - **Codex CLI:** run
   `python <BASE_DIR>/scripts/baton_next.py --spawn --provider codex`.
@@ -153,7 +164,8 @@ non-interactive `codex exec` surface; Claude uses a detached headless backend on
 headless argv.
 
 Report the backend, relay generation, and either the `tmux attach` line or the detached
-PID and log path. Say that the successor is running only after exit 0.
+PID and log path. Say that the successor is running only after exit 0 and a matching
+receipt exists. A manual fallback is never a successful launch.
 
 **If the output contains a `WILL WAIT FOR YOU:` block, repeat it verbatim.** An
 interactive tmux successor may be parked at trust or approval prompts. A detached
@@ -182,7 +194,7 @@ session was about to inherit a half-written document.
 
 Read `<root>/.baton/BATON_CURRENT`, then the baton it names.
 
-**Run §2's invariant check before touching anything.** If it does not match, STOP and
+**Run §2's `batonctl verify-state` invariant check before touching anything.** If it does not match, STOP and
 report the mismatch — do not improvise around it. A failed invariant means the baton
 is stale on either code or process, and its steps may now be wrong.
 

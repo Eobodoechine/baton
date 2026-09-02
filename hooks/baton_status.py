@@ -14,6 +14,10 @@ import sys
 import time
 
 import baton_gate
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+import baton_runtime as runtime  # noqa: E402
 
 
 def _card_pin(path):
@@ -63,17 +67,35 @@ def build_status(start=None, gate_dir=None, session_id=None):
         except OSError:
             age = None
 
-    gate_dir = os.path.expanduser(gate_dir or os.environ.get(
-        "LOOP_GATE_DIR", "~/.loop-gate"))
+    config = runtime.load_config()
+    auto_states = []
+    for host in ("codex", "claude"):
+        directory = runtime.runtime_home() / "state" / host
+        if directory.is_dir():
+            for state_file in directory.glob("*.json"):
+                try:
+                    state = json.loads(state_file.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(state, dict):
+                    auto_states.append(state)
+    active_auto = [state for state in auto_states
+                   if state.get("phase") in ("due", "cutting", "launch_pending")]
+    # Retain the old Loop marker in status only for the temporary compatibility
+    # period.  New hosted hooks never create it.
+    gate_dir = os.path.expanduser(gate_dir or os.environ.get("LOOP_GATE_DIR", "~/.loop-gate"))
     due_files = glob.glob(os.path.join(gate_dir, "*_baton_due"))
     session_id = session_id or os.environ.get("CLAUDE_SESSION_ID")
     if session_id:
-        due = os.path.exists(os.path.join(
+        legacy_due = os.path.exists(os.path.join(
             gate_dir, "%s_baton_due" % baton_gate._session_key(session_id)))
+        auto_due = any(state.get("session_id") == runtime.session_key(session_id)
+                       for state in active_auto)
+        due = legacy_due or auto_due
         due_scope = "session"
     else:
-        due = bool(due_files)
-        due_scope = "all_sessions"
+        due = bool(due_files or active_auto)
+        due_scope = "all_sessions" if due else "none"
 
     return {
         "root": root,
@@ -89,7 +111,12 @@ def build_status(start=None, gate_dir=None, session_id=None):
             baton and baton_gate.baton_is_valid(baton, expected_root=root)),
         "due_flag": due,
         "due_scope": due_scope,
-        "due_count": len(due_files),
+        "due_count": len(due_files) + len(active_auto),
+        "automatic_handoff": config["auto_handoff"],
+        "agents": config["agents"],
+        "automatic_states": [{key: state.get(key) for key in
+                              ("host", "session_id", "phase", "handoff_id", "last_error")}
+                             for state in active_auto],
     }
 
 

@@ -31,6 +31,12 @@ import subprocess
 import sys
 import time
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(HERE)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+import baton_runtime as runtime  # noqa: E402
+
 # --- Trigger thresholds -----------------------------------------------------
 #
 # 200k-class operating window. Claude Code auto-compaction is BELIEVED to fire near
@@ -156,6 +162,44 @@ def context_tokens(transcript_path):
     return 0
 
 
+def codex_context_usage(transcript_path):
+    """Return Codex's latest (input_tokens, context_window) record.
+
+    ``cached_input_tokens`` is deliberately not added: Codex reports it as a
+    subset of input tokens.  The event stream is an opportunistic signal only;
+    PreCompact remains the reliable no-token fallback.
+    """
+    if not transcript_path or not os.path.exists(transcript_path):
+        return 0, 0
+    try:
+        size = os.path.getsize(transcript_path)
+        with open(transcript_path, "rb") as fh:
+            if size > TAIL_BYTES:
+                fh.seek(size - TAIL_BYTES)
+                fh.readline()
+            rows = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return 0, 0
+    for row in reversed(rows):
+        try:
+            event = json.loads(row)
+        except (TypeError, ValueError):
+            continue
+        message = event.get("event_msg") if isinstance(event, dict) else None
+        token_count = message.get("token_count") if isinstance(message, dict) else None
+        info = token_count.get("info") if isinstance(token_count, dict) else None
+        usage = info.get("last_token_usage") if isinstance(info, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        tokens = usage.get("input_tokens")
+        if not isinstance(tokens, int):
+            continue
+        window = (usage.get("context_window") or info.get("context_window") or
+                  info.get("context_window_tokens") or 0)
+        return tokens, window if isinstance(window, int) else 0
+    return 0, 0
+
+
 class BatonRootError(RuntimeError):
     """No repository owns the directory a baton would be written from."""
 
@@ -165,11 +209,12 @@ class BatonPointerError(RuntimeError):
 
 
 def project_root(start=None):
-    """Resolve the repository that owns this work, refusing guessed directories.
+    """Resolve the exact working checkout that owns this baton.
 
-    The common git directory anchors linked worktrees to their owning clone. A
-    submodule remains its own repository. Outside a non-bare repository there is no
-    safe place for a baton, so callers get an explicit refusal instead of `$PWD`.
+    A linked worktree must keep its own Baton state: a version-2 dirty fingerprint is
+    meaningful only for the checkout a successor will actually reuse.  Submodules are
+    therefore their own roots.  Outside a non-bare repository there is no safe place
+    for a baton, so callers get an explicit refusal instead of `$PWD`.
     """
     cur = os.path.abspath(start or os.getcwd())
     try:
@@ -188,29 +233,17 @@ def project_root(start=None):
             "%s is not inside a git repository, so no repository owns a baton "
             "written here" % cur
         )
-    if not os.path.isabs(common):
-        common = os.path.abspath(os.path.join(cur, common))
-    # Git commonly emits forward slashes on Windows. Normalize before deriving the
-    # owning clone so callers receive a native, comparable filesystem path.
-    common = os.path.normpath(common)
-    if os.path.basename(common) == ".git":
-        return os.path.dirname(common)
-
-    sup = subprocess.run(
-        ["git", "-C", cur, "rev-parse", "--show-superproject-working-tree"],
+    top = subprocess.run(
+        ["git", "-C", cur, "rev-parse", "--show-toplevel"],
         capture_output=True, text=True, timeout=15,
     )
-    if sup.returncode == 0 and sup.stdout.strip():
-        top = subprocess.run(
-            ["git", "-C", cur, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if top.returncode == 0 and top.stdout.strip():
-            value = os.path.normpath(top.stdout.strip())
-            return value if os.path.isabs(value) else os.path.abspath(
-                os.path.join(cur, value))
+    if top.returncode == 0 and top.stdout.strip():
+        value = os.path.normpath(top.stdout.strip())
+        if not os.path.isabs(value):
+            value = os.path.abspath(os.path.join(cur, value))
+        return os.path.realpath(value)
     raise BatonRootError(
-        "%s resolves to the bare repository %s, which has no working tree to hold "
+        "%s resolves to the bare repository %s, which has no working checkout to hold "
         "a .baton/ directory" % (cur, common)
     )
 
@@ -294,6 +327,17 @@ def baton_is_valid(path, expected_root=None):
     if not repo or not os.path.isabs(repo.group(1)):
         return False
     if expected_root and os.path.realpath(repo.group(1)) != os.path.realpath(expected_root):
+        return False
+    headers = runtime.baton_headers(path)
+    # A missing header denotes a legacy v1 baton.  Once a cutter explicitly claims
+    # v2, every repository-state field is mandatory; accepting a half-upgraded card
+    # would create a false assurance at pickup.
+    if headers.get("Baton-Version") == "2":
+        if (not re.fullmatch(r"[0-9a-f]{40}", headers.get("Head", "")) or
+                headers.get("Worktree") not in ("clean", "dirty") or
+                not runtime.SHA256_RE.fullmatch(headers.get("Worktree-Fingerprint", ""))):
+            return False
+    elif headers.get("Baton-Version") not in (None, "1"):
         return False
     return True
 
@@ -383,10 +427,227 @@ def _fresh_baton(root, newer_than=0.0):
     return path if baton_is_valid(path, expected_root=root) else None
 
 
+# --- portable automatic-handoff state machine -----------------------------
+
+def _auto_host(payload):
+    host = payload.get("_baton_host")
+    return host if host in ("codex", "claude") else None
+
+
+def _auto_root(payload):
+    return project_root(payload.get("cwd"))
+
+
+def _auto_enabled(host, root):
+    return bool(host and runtime.auto_enabled(host, root))
+
+
+def _new_state(host, session, root, payload):
+    return {
+        "schema_version": 1,
+        "host": host,
+        "session_id": runtime.session_key(session),
+        "turn_id": runtime.session_key(payload.get("turn_id") or "noturn"),
+        "repository": os.path.realpath(root),
+        "provider": host,
+        "phase": "observing",
+        "continuation_attempts": 0,
+        "stop_hook_active": False,
+        "recent": [],
+    }
+
+
+def _save_auto_state(host, session, state):
+    state["updated_at"] = time.time()
+    runtime.write_state(host, session, state)
+
+
+def _mark_due(state, reason, tokens=0, window=0):
+    if state.get("phase") not in ("launched", "manual_required"):
+        state["phase"] = "due"
+        state["trigger_reason"] = reason
+        state["triggered_at"] = state.get("triggered_at") or time.time()
+    state["observed_tokens"] = tokens
+    state["context_window"] = window
+
+
+def _auto_meter(payload, host):
+    try:
+        root = _auto_root(payload)
+    except BatonRootError:
+        return 0
+    if not _auto_enabled(host, root):
+        return 0
+    session = payload.get("session_id") or "nosession"
+    config = runtime.load_config()
+    tokens = context_window = 0
+    if host == "codex":
+        tokens, context_window = codex_context_usage(payload.get("transcript_path"))
+    else:
+        tokens = context_tokens(payload.get("transcript_path"))
+        raw_window = payload.get("context_window") or payload.get("context_window_tokens")
+        context_window = raw_window if isinstance(raw_window, int) else 0
+    try:
+        with runtime.session_lock(host, session):
+            state = runtime.read_state(host, session) or _new_state(host, session, root, payload)
+            state.update({
+                "repository": os.path.realpath(root),
+                "turn_id": runtime.session_key(payload.get("turn_id") or state.get("turn_id") or "noturn"),
+                "provider": host,
+                "observed_tokens": tokens,
+                "context_window": context_window,
+            })
+            # Persist the rolling signature even when the platform cannot report a
+            # context window.  The three-call detector is an independent trigger.
+            signature = hashlib.sha256(json.dumps(
+                [payload.get("tool_name"), payload.get("tool_input")],
+                sort_keys=True, default=str,
+            ).encode("utf-8")).hexdigest()[:16]
+            recent = list(state.get("recent") or [])[-(STUCK_REPEATS - 1):]
+            recent.append(signature)
+            state["recent"] = recent
+            if state.get("phase") not in ("launched", "manual_required"):
+                if (len(recent) == STUCK_REPEATS and len(set(recent)) == 1):
+                    _mark_due(state, "stuck:%s" % signature, tokens, context_window)
+                elif context_window:
+                    ratio = float(tokens) / float(context_window)
+                    if ratio >= config["hard_ratio"]:
+                        _mark_due(state, "hard:%.0f%%" % (ratio * 100), tokens, context_window)
+                    elif ratio >= config["soft_ratio"]:
+                        _mark_due(state, "soft:%.0f%%" % (ratio * 100), tokens, context_window)
+            _save_auto_state(host, session, state)
+    except OSError as exc:
+        runtime.record_error(host, session, repr(exc))
+    return 0
+
+
+def _auto_nag(payload, host):
+    try:
+        root = _auto_root(payload)
+    except BatonRootError:
+        return 0
+    if not _auto_enabled(host, root):
+        return 0
+    state = runtime.read_state(host, payload.get("session_id") or "nosession")
+    if state.get("phase") == "due":
+        _emit_context("UserPromptSubmit",
+                      "BATON DUE (%s): finish the micro-step, then invoke the installed Baton skill's cut action." %
+                      state.get("trigger_reason", "due"))
+    return 0
+
+
+def _baton_launch_info(root, state, provider):
+    try:
+        baton = current_baton(root, require_valid=True)
+    except BatonPointerError:
+        return None
+    if not baton:
+        return None
+    try:
+        if state.get("triggered_at") and os.path.getmtime(baton) < float(state["triggered_at"]):
+            return None
+    except (OSError, TypeError, ValueError):
+        return None
+    ok, _message = runtime.verify_baton_state(baton, root)
+    if not ok:
+        return None
+    baton_hash = runtime.file_hash(baton)
+    headers = runtime.baton_headers(baton)
+    generation = int(state.get("generation") or 1)
+    handoff = runtime.handoff_id(root, baton_hash, generation, provider)
+    return {
+        "baton_path": os.path.realpath(baton),
+        "baton_hash": baton_hash,
+        "repository_state_fingerprint": headers.get("Worktree-Fingerprint", ""),
+        "handoff_id": handoff,
+        "generation": generation,
+    }
+
+
+def _manual_command(provider):
+    return "%s %s --spawn --provider %s" % (
+        sys.executable, os.path.join(ROOT_DIR, "scripts", "baton_next.py"), provider)
+
+
+def _auto_stop(payload, host):
+    try:
+        root = _auto_root(payload)
+    except BatonRootError:
+        return 0
+    if not _auto_enabled(host, root):
+        return 0
+    session = payload.get("session_id") or "nosession"
+    config = runtime.load_config()
+    try:
+        with runtime.session_lock(host, session):
+            state = runtime.read_state(host, session) or _new_state(host, session, root, payload)
+            if state.get("phase") not in ("due", "cutting", "launch_pending"):
+                return 0
+            state["stop_hook_active"] = bool(payload.get("stop_hook_active"))
+            state["turn_id"] = runtime.session_key(payload.get("turn_id") or state.get("turn_id") or "noturn")
+            info = _baton_launch_info(root, state, host)
+            if info:
+                state.update(info)
+                receipt = runtime.successful_receipt(info["handoff_id"])
+                if receipt:
+                    state.update({"phase": "launched", "launch_status": "launched",
+                                  "receipt": receipt, "last_error": ""})
+                    _save_auto_state(host, session, state)
+                    return 0
+                state["phase"] = "launch_pending"
+                instruction = (
+                    "A valid Baton already exists at %(baton_path)s, but handoff %(handoff_id)s has no launch receipt. "
+                    "Do not rewrite the baton. Invoke only its launch step for provider %(provider)s and record the matching receipt."
+                    % dict(info, provider=host))
+            else:
+                state["phase"] = "cutting"
+                instruction = (
+                    "Baton handoff is due. Invoke the installed Baton skill's cut action now: write and validate a Baton-Version: 2 baton, "
+                    "then launch exactly one %(provider)s successor and record its receipt. Do not write baton prose in this hook."
+                    % {"provider": host})
+            attempts = int(state.get("continuation_attempts") or 0)
+            if attempts >= config["max_stop_attempts"]:
+                state.update({"phase": "manual_required", "last_error": "continuation limit reached",
+                              "manual_command": _manual_command(host)})
+                _save_auto_state(host, session, state)
+                _emit_context("Stop", "BATON MANUAL REQUIRED: %s" % state["manual_command"])
+                return 0
+            state["continuation_attempts"] = attempts + 1
+            _save_auto_state(host, session, state)
+            _emit_context("Stop", "%s (continuation %d/%d)" % (
+                instruction, attempts + 1, config["max_stop_attempts"]))
+            return 2
+    except (OSError, ValueError, RuntimeError) as exc:
+        runtime.record_error(host, session, repr(exc))
+        return 0
+
+
+def _auto_compact_marker(payload, host):
+    try:
+        root = _auto_root(payload)
+    except BatonRootError:
+        return 0
+    if not _auto_enabled(host, root):
+        return 0
+    session = payload.get("session_id") or "nosession"
+    try:
+        with runtime.session_lock(host, session):
+            state = runtime.read_state(host, session) or _new_state(host, session, root, payload)
+            _mark_due(state, "precompact:auto", state.get("observed_tokens", 0),
+                      state.get("context_window", 0))
+            _save_auto_state(host, session, state)
+    except OSError as exc:
+        runtime.record_error(host, session, repr(exc))
+    return 0
+
+
 # --- modes ------------------------------------------------------------------
 
 def mode_meter(payload):
     """PostToolUse. Silent. Measures, flags, and never speaks to the model."""
+    host = _auto_host(payload)
+    if host:
+        return _auto_meter(payload, host)
     session = payload.get("session_id") or ""
     tokens = context_tokens(payload.get("transcript_path"))
 
@@ -436,6 +697,9 @@ def mode_meter(payload):
 
 def mode_nag(payload):
     """UserPromptSubmit. One line, once, only while genuinely due."""
+    host = _auto_host(payload)
+    if host:
+        return _auto_nag(payload, host)
     session = payload.get("session_id") or ""
     due = _flag(session, "baton_due")
     if not os.path.exists(due):
@@ -458,6 +722,9 @@ def mode_nag(payload):
 def mode_gate(payload):
     """Stop. Blocks ONLY inside an armed loop run -- ordinary chat sessions are never
     held hostage by this hook."""
+    host = _auto_host(payload)
+    if host:
+        return _auto_stop(payload, host)
     session = payload.get("session_id") or ""
     due = _flag(session, "baton_due")
     if not os.path.exists(due):
@@ -522,6 +789,14 @@ def mode_pickup(payload):
     if age > BATON_TTL_SECONDS:
         return 0
 
+    # A v2 baton pins both repository bytes and dirty worktree state.  Check it before
+    # consuming BATON_CURRENT; a mismatch must leave the pointer available for human
+    # diagnosis rather than sending a successor into a changed checkout.
+    valid_state, state_message = runtime.verify_baton_state(target, root)
+    if not valid_state:
+        sys.stderr.write("baton pickup refused: %s\n" % state_message)
+        return 0
+
     # Preserve the archived baton as immutable evidence. Pickup events belong in the
     # append-only ledger, not appended to the handoff document itself.
     try:
@@ -569,6 +844,9 @@ def mode_post_compact_warn(payload):
 def mode_compact_marker(payload):
     """PreCompact(auto). Cannot block compaction, cannot make the model write. Records
     that it happened and says nothing."""
+    host = _auto_host(payload)
+    if host:
+        return _auto_compact_marker(payload, host)
     session = payload.get("session_id") or ""
     try:
         with open(_flag(session, "baton_compacted"), "w", encoding="utf-8") as fh:
@@ -602,7 +880,15 @@ def main(argv):
         sys.stderr.write("baton_gate.py: unknown mode; expected one of %s\n"
                          % ", ".join(sorted(MODES)))
         return 0
-    return MODES[mode](_read_payload())
+    payload = _read_payload()
+    if "--host" in argv:
+        try:
+            host = argv[argv.index("--host") + 1]
+        except IndexError:
+            host = ""
+        if host in ("codex", "claude"):
+            payload["_baton_host"] = host
+    return MODES[mode](payload)
 
 
 if __name__ == "__main__":

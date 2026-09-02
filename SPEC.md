@@ -44,9 +44,10 @@ The baton pins the card by content hash — `Card: .baton/PROJECT_CARD.md @ a3f9
 If the on-disk hash differs, process drifted under the baton and the receiver's
 invariant check fails closed.
 
-The baton also names its owning repository — `Repo: /absolute/path/to/clone`. The
-shared resolver anchors linked worktrees to their owning clone and refuses to guess a
-directory outside Git. Pickup, status, and relay all use that resolver.
+The baton also names its exact working checkout — `Repo: /absolute/path/to/checkout`.
+Linked worktrees remain distinct because a dirty fingerprint can only be checked against
+the checkout a successor will reuse. Pickup, status, and relay refuse to guess a
+directory outside Git.
 
 The card is the **executable** layer; the repository's applicable agent instructions
 (for example `AGENTS.md`, `CLAUDE.md`, or another designated file) remain the
@@ -97,6 +98,30 @@ positions: first content block, and repeated verbatim as the final line.
 | 9 | `## 9. GOTCHAS` | 200 | no | 3rd |
 | 10 | `## 10. DECISIONS + WHY` | frontier only | no | **1st** |
 | 11 | `## 11. DONE MEANS` + repeated DO-THIS-NOW | 150 | YES | never |
+
+### Version-2 checkout invariant
+
+New cuts write `Baton-Version: 2` and include these header fields before `Card:`:
+
+```
+Baton-Version: 2
+Head: <40-character commit SHA>
+Worktree: clean|dirty
+Worktree-Fingerprint: sha256:<64 hex characters>
+```
+
+The fingerprint covers the current HEAD, NUL-delimited porcelain status, separate
+staged and unstaged binary diffs, sorted untracked paths plus content/symlink hashes,
+renames, deletions, file modes, and submodule status. `.baton/` itself is excluded so a
+cut and its receipt do not invalidate their own invariant. The literal section-2
+verification command is `python <BATON_BASE>/scripts/batonctl.py verify-state --root
+<REPO> --baton <BATON_PATH>`; pickup runs the equivalent check before consuming
+`BATON_CURRENT`.
+
+Dirty worktrees are valid automatic handoffs. Baton never creates a WIP commit and the
+successor reuses that same checkout. A changed fingerprint fails closed before any
+successor edit. Version-1 batons remain lintable and relayable with an explicit legacy
+warning, but have no worktree-state proof.
 
 ### Generator rules (enforced by `lint_baton.py`)
 
@@ -232,8 +257,9 @@ still cut cleanly.
 Model-executed at cut time. Recorded in the run log, **not** in the baton.
 
 - [ ] No pending tool calls.
-- [ ] No background processes owned by this session.
-- [ ] No uncommitted changes.
+- [ ] No unfinished foreground tool call.
+- [ ] Background processes are recorded as state; Baton does not kill them.
+- [ ] Dirty changes are fingerprinted when present; Baton never auto-commits them.
 - [ ] No unanswered user question in the last 3 turns.
 
 ### What is actually measurable — honest accounting
@@ -243,7 +269,7 @@ Stating this plainly rather than implying the system senses more than it does.
 | Signal | Detectable? | How |
 |---|---|---|
 | Context fill | **YES** | Hooks receive `transcript_path`; last assistant `usage` gives `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. Tail-read only. |
-| 3x identical tool call | **YES** | 3-deep rolling hash of `(tool_name, args)` in `$LOOP_GATE_DIR/<session>_baton_state.json` |
+| 3x identical tool call | **YES** | 3-deep rolling hash of `(tool_name, args)` in the Baton-owned per-session state record |
 | Task boundary | **NO** | Model-judged. Anchored to the mechanical proxy that exists: the green micro-step commit `micro_step_gates.py` already forces. The hook raises the flag; the model picks the moment. |
 | Goal drift, output quality, unanswered questions | **NO** | Not mechanically detectable. Model-side checklist only. |
 | Auto-compact imminence | **NO** | `PreCompact` can neither block compaction nor make the model write. The 160k hard trigger is the proxy; PreCompact only records that compaction happened *without* a baton. |
@@ -252,12 +278,12 @@ The model's own estimate of its context usage is unreliable and is never used.
 
 ## 6. Automation
 
-`hooks/baton_gate.py` is argv-flag dispatched and may be registered in
-`~/.claude/settings.json`. These lifecycle hooks are a Claude Code adapter, not part of
-the Baton document contract. Codex and other receivers remain fully functional through
-the installed skill and manual status/cut/pickup flow. `install.py` prints guarded
-commands for the current platform when Claude is an install target; hooks remain
-optional.
+`hooks/baton_gate.py` is argv-flag dispatched and uses the shared Baton runtime at
+`~/.baton/` (or the test/advanced `BATON_HOME` override). Installation alone leaves
+automation off. `python scripts/batonctl.py auto enable --agent codex|claude|all` is the
+explicit opt-in that atomically merges only Baton-owned hook entries; project owners can
+opt out with `.baton/AUTO_HANDOFF_DISABLED`. Disable retains harmless hook wiring;
+`batonctl hooks uninstall --agent ...` is the separate explicit removal action.
 
 > **Trap:** `~/.claude/hooks/{session_init,user_prompt_submit,pre_tool_use}.py` are
 > inert duplicates. Nothing references them; the live copies run from the model-router
@@ -265,16 +291,21 @@ optional.
 
 | Event | Flag | Behavior |
 |---|---|---|
-| `PostToolUse` | `--meter` | Measure context; maintain tool-call hash; write `<session>_baton_due` on trigger. Emits nothing. |
-| `UserPromptSubmit` | `--nag` | One line when due, once per turn. |
-| `Stop` | `--gate` | **Only in armed loop runs** (`$LOOP_GATE_DIR/<session>_target` exists). Blocks up to 3x if no fresh valid baton, then allows and writes `_BATON_MISSING`. |
+| `PostToolUse` | `--meter --host codex|claude` | Update measurement/state; never writes baton prose. Claude reads its current usage record; Codex reads `event_msg.token_count.info.last_token_usage.input_tokens` without double-counting cached input. |
+| `UserPromptSubmit` | `--nag --host codex|claude` | One short reminder while due. |
+| `Stop` | `--gate --host codex|claude` | When explicitly enabled, continue up to three times: first request a model-authored v2 cut, then only a missing launch receipt. It requires no Loop marker. |
 | `SessionStart` (`startup`, `resume`) | `--pickup` | One <=120-char line if a baton <48h old is pending; consume-once. |
 | `SessionStart` (`compact`) | `--post-compact-warn` | Brands the compaction summary untrusted. |
-| `PreCompact` (`auto`) | `--compact-marker` | Records the missed baton. Nothing else. |
+| `PreCompact` (`auto`) | `--compact-marker --host codex|claude` | Marks the state due when token data is unavailable. Nothing else. |
 
-Every mode fails open on `OSError`. **The machinery may stamp, never summarize** — no
-hook ever writes baton prose. That is the `#46602` lesson encoded as an architectural
-rule.
+State transitions are `observing -> due -> cutting -> launch_pending -> launched`, with
+`manual_required` and `failed` terminal alternatives. Each record lives at
+`~/.baton/state/<host>/<session>.json`, is atomically written under a cross-platform
+per-session lock, and records reason/tokens/turn, baton hash/fingerprint, receipt and
+last error. A due cycle clears only after both a valid new baton and a matching launch
+receipt exist. Every mode fails open on internal errors while preserving the error for
+`batonctl doctor`. **The machinery may stamp, never summarize** — no hook ever writes
+baton prose.
 
 ### Registration must be existence-guarded
 
@@ -339,10 +370,9 @@ generation. A host app may use that manifest to create a visible task. The host 
 claim success only after it receives a task identifier. App-hosted receivers carry the
 generation in the prompt and pass it back with `--parent-generation` on the next cut.
 
-**Claude adapter live-tested 2026-08-26** (scratch repo, `claude-haiku-4-5` receiver, real sessions).
-The successor read the baton, ran the §2 invariant check *before* anything else, executed
-§3, self-verified, and honoured "do not cut a baton". Two blockers surfaced that no dry
-run would have shown, and `--spawn` now warns about both:
+**Historical Claude adapter probe (2026-08-26; not a v1 acceptance receipt).** A scratch
+session exposed two blockers that no dry run would have shown. This history informs the
+warnings below but does not mark Claude Code verified in the v1 acceptance matrix:
 
 1. **Folder trust is per-directory and is checked before the prompt is read.** The child
    parks at *"Is this a project you trust?"*. Running `claude` from a parent directory

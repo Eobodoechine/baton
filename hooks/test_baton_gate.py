@@ -88,7 +88,7 @@ def test_project_root_refuses_to_guess_outside_git(tmp_path):
         bg.project_root(str(tmp_path))
 
 
-def test_linked_worktree_resolves_to_its_owning_clone(tmp_path):
+def test_linked_worktree_resolves_to_its_exact_checkout(tmp_path):
     owner = tmp_path / "owner"
     owner.mkdir()
     subprocess.run(["git", "init", "-q", str(owner)], check=True)
@@ -103,7 +103,7 @@ def test_linked_worktree_resolves_to_its_owning_clone(tmp_path):
         "git", "-C", str(owner), "worktree", "add", "-q", "-b",
         "baton-test-worktree", str(worktree),
     ], check=True)
-    assert bg.project_root(str(worktree)) == str(owner)
+    assert bg.project_root(str(worktree)) == str(worktree)
 
 
 # --- context measurement ----------------------------------------------------

@@ -203,6 +203,19 @@ def test_spawn_uses_fake_tmux_and_never_starts_a_real_model(tmp_path):
     logged = (root / ".baton" / "batons.log").read_text()
     assert "\trelay\t" in logged
     assert "provider=codex" in logged
+    receipts = list((root / "home" / ".baton" / "receipts").glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["status"] == "launched"
+    # A retry must recover the receipt before querying/creating another tmux session.
+    before_retry_calls = calls.read_text()
+    retry = run(root, "--spawn", "--provider", "codex", env={
+        "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+        "FAKE_TMUX_CALLS": str(calls),
+    })
+    assert retry.returncode == 0
+    assert "recovered existing launch receipt" in retry.stdout
+    assert calls.read_text() == before_retry_calls
 
 
 @pytest.mark.skipif(os.name == "nt", reason="PATH isolation fixture is POSIX-only")
@@ -214,6 +227,8 @@ def test_spawn_without_tmux_refuses_an_invisible_wait(tmp_path):
     assert result.returncode == 4
     assert "refusing to detach" in result.stderr
     assert "claude" in result.stdout
+    receipts_dir = root / "home" / ".baton" / "receipts"
+    assert not receipts_dir.exists() or not list(receipts_dir.glob("*.json"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="PATH isolation fixture is POSIX-only")
@@ -436,12 +451,15 @@ def test_manifest_is_validated_provider_neutral_host_input(tmp_path):
                  "--parent-generation", "2", "--max-generation", "5")
     assert result.returncode == 0, result.stderr
     manifest = json.loads(result.stdout)
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["provider"] == "codex"
     assert manifest["root"] == str(root)
     assert manifest["generation"] == 3
     assert manifest["maximum_generation"] == 5
     assert "--parent-generation 3" in manifest["prompt"]
+    assert len(manifest["handoff_id"]) == 64
+    assert manifest["handoff_id"] in manifest["successor_title"]
+    assert manifest["receipt_recording_argv"][2:4] == ["receipt", "--handoff-id"]
 
 
 def test_manifest_honors_the_depth_cap(tmp_path):
@@ -451,6 +469,31 @@ def test_manifest_honors_the_depth_cap(tmp_path):
     assert result.returncode == 3
     assert "depth cap" in result.stderr
     assert result.stdout.startswith("codex -C ")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake tmux fixture is POSIX-only")
+def test_unrelated_deterministic_session_collision_keeps_exit_six(tmp_path):
+    root = project(tmp_path)
+    manifest_result = run(root, "--manifest", "--provider", "codex")
+    assert manifest_result.returncode == 0
+    manifest = json.loads(manifest_result.stdout)
+    session = "baton-project-codex-g1-%s" % manifest["handoff_id"][:16]
+    relay_dir = root / ".baton" / "relay"
+    relay_dir.mkdir()
+    (relay_dir / (session + ".handoff")).write_text("not-this-handoff\n")
+    fake_bin = tmp_path / "collision-bin"
+    fake_bin.mkdir()
+    tmux = fake_bin / "tmux"
+    tmux.write_text("#!/bin/sh\nexit 0\n")
+    tmux.chmod(0o755)
+    codex = fake_bin / "codex"
+    codex.write_text("#!/bin/sh\nexit 0\n")
+    codex.chmod(0o755)
+    result = run(root, "--spawn", "--provider", "codex", env={
+        "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+    })
+    assert result.returncode == 6
+    assert "another handoff" in result.stderr
 
 
 def test_invalid_codex_policy_fails_before_launch(tmp_path):

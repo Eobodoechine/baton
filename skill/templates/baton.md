@@ -1,22 +1,27 @@
 # BATON — {{TOPIC}} (cut {{YYYY-MM-DD HH:MM}})
+Baton-Version: 2
 Chain: {{N}} / Parent: {{PARENT_PATH_OR_none}}
 Detail tier: {{teaching|brief}}   # a DETAIL budget, not a model choice
-Repo: {{ABSOLUTE_PATH_OF_THE_OWNING_CLONE}}
+Repo: {{ABSOLUTE_PATH_OF_THE_EXACT_CHECKOUT}}
+Head: {{40_CHARACTER_CURRENT_HEAD_SHA}}
+Worktree: {{clean|dirty}}
+Worktree-Fingerprint: sha256:{{64_HEX_CHARACTERS}}
 Card: .baton/PROJECT_CARD.md @ {{CARD_HASH8}}
 Trust rule: This file is a summary. Anything tagged [S] is summary-derived —
 verify it against the repo before acting on it.
+
+<!-- Before filling Head/Worktree/Fingerprint, run:
+python {{BATON_BASE_DIR}}/scripts/batonctl.py snapshot --root {{REPO}} -->
 
 ## 1. DO THIS NOW
 Run: {{THE ONE COMMAND}}
 Expected: {{THE LITERAL STRING TO LOOK FOR}}
 
 ## 2. WHERE YOU ARE — invariant check
-Run: git -C {{REPO}} log --oneline -1
-Expected: starts with {{SHA8}}
-Run: shasum -a 256 {{REPO}}/.baton/PROJECT_CARD.md | cut -c1-8
-Expected: {{CARD_HASH8}}
-If either does not match: STOP. Reply "invariant mismatch: <what you saw>" and do
-nothing else.
+Run: python {{BATON_BASE_DIR}}/scripts/batonctl.py verify-state --root {{REPO}} --baton {{BATON_PATH}}
+Expected: repository state verified
+This verifies the exact HEAD, pinned card hash, and worktree fingerprint. If it does
+not exit 0: STOP. Reply "invariant mismatch: <what you saw>" and do nothing else.
 
 ## 3. THE TASK — numbered steps
 1. {{Step. Name the exact file and the exact function or lines.}}

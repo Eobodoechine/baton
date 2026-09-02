@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import sys
 
+import baton_runtime as runtime
+
 
 def _digest(path):
     hasher = hashlib.sha256()
@@ -65,17 +67,27 @@ def shell_quote(value, windows=None):
     return shlex.quote(str(value))
 
 
-def hook_config(repo, executable=None, windows=None):
+def hook_config(repo, executable=None, windows=None, agent="claude"):
+    """Return Baton-owned lifecycle entries for one host.
+
+    Both supported hosts use the same event names but commands carry an explicit
+    host marker.  That marker is intentionally part of the command (rather than
+    guessed from the machine) so an installation containing both hosts cannot
+    accidentally route a Stop continuation to the wrong relay provider.
+    """
+    if agent not in ("codex", "claude"):
+        raise ValueError("agent must be 'codex' or 'claude'")
     executable = executable or sys.executable
     hook = repo / "hooks" / "baton_gate.py"
     q_python = shell_quote(executable, windows=windows)
     q_hook = shell_quote(hook, windows=windows)
 
     def command(mode):
+        args = "%s --host %s" % (mode, agent)
         if windows if windows is not None else os.name == "nt":
-            return "if exist %s (%s %s %s)" % (q_hook, q_python, q_hook, mode)
+            return "if exist %s (%s %s %s)" % (q_hook, q_python, q_hook, args)
         return "if [ -f %s ]; then %s %s %s; fi" % (
-            q_hook, q_python, q_hook, mode)
+            q_hook, q_python, q_hook, args)
 
     def entry(mode, timeout, matcher=None):
         value = {"hooks": [{"type": "command", "command": command(mode),
@@ -92,6 +104,120 @@ def hook_config(repo, executable=None, windows=None):
                          entry("--post-compact-warn", 5, "compact")],
         "PreCompact": [entry("--compact-marker", 5, "auto")],
     }}
+
+
+def host_settings_path(agent, home=None):
+    home = Path(home or Path.home()).expanduser().resolve()
+    if agent == "codex":
+        return home / ".codex" / "hooks.json"
+    if agent == "claude":
+        return home / ".claude" / "settings.json"
+    raise ValueError("agent must be 'codex' or 'claude'")
+
+
+def _normalized_baton_mode(command):
+    """Identify one Baton hook command without treating arbitrary hooks as ours."""
+    if not isinstance(command, str) or "baton_gate.py" not in command:
+        return None
+    for mode in ("--meter", "--nag", "--gate", "--pickup",
+                 "--post-compact-warn", "--compact-marker"):
+        if mode in command:
+            return mode
+    return None
+
+
+def _entries(config):
+    hooks = config.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("malformed hook settings: 'hooks' must be an object")
+    return hooks
+
+
+def _hook_commands(entry):
+    if not isinstance(entry, dict):
+        return []
+    items = entry.get("hooks")
+    if not isinstance(items, list):
+        return []
+    return [hook.get("command") for hook in items if isinstance(hook, dict)]
+
+
+def _backup_once(path):
+    backup = path.with_name(path.name + ".baton-backup")
+    if path.exists() and not backup.exists():
+        shutil.copy2(path, backup)
+        try:
+            backup.chmod(0o600)
+        except OSError:
+            pass
+
+
+def _read_settings(path):
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError("refusing malformed JSON in %s: %s" % (path, exc))
+    if not isinstance(value, dict):
+        raise ValueError("refusing malformed JSON in %s: expected an object" % path)
+    return value
+
+
+def host_has_baton_hook(path):
+    try:
+        settings = _read_settings(path)
+        hooks = settings.get("hooks", {})
+        return isinstance(hooks, dict) and any(
+            _normalized_baton_mode(command)
+            for entries in hooks.values() if isinstance(entries, list)
+            for entry in entries for command in _hook_commands(entry)
+        )
+    except ValueError:
+        return False
+
+
+def _merge_entries(existing, generated):
+    """Keep unrelated hooks verbatim and replace only our equivalent modes."""
+    modes = {_normalized_baton_mode(command)
+             for entry in generated for command in _hook_commands(entry)}
+    modes.discard(None)
+    retained = [entry for entry in existing if not any(
+        _normalized_baton_mode(command) in modes for command in _hook_commands(entry))]
+    return retained + generated
+
+
+def merge_host_hooks(repo, agent, home=None, executable=None, windows=None):
+    path = host_settings_path(agent, home)
+    settings = _read_settings(path)
+    _backup_once(path)
+    current = _entries(settings)
+    generated = hook_config(repo, executable=executable, windows=windows,
+                            agent=agent)["hooks"]
+    for event, entries in generated.items():
+        current[event] = _merge_entries(current.get(event, []), entries)
+    runtime.atomic_write_json(path, settings)
+    return path
+
+
+def remove_host_hooks(repo, agent, home=None):
+    path = host_settings_path(agent, home)
+    settings = _read_settings(path)
+    if not path.exists():
+        return path
+    _backup_once(path)
+    current = _entries(settings)
+    for event, entries in list(current.items()):
+        if not isinstance(entries, list):
+            continue
+        remaining = [entry for entry in entries if not any(
+            _normalized_baton_mode(command) for command in _hook_commands(entry))]
+        if remaining:
+            current[event] = remaining
+        else:
+            current.pop(event, None)
+    runtime.atomic_write_json(path, settings)
+    return path
 
 
 def _skills_dir(agent, home):
@@ -160,13 +286,21 @@ def install(repo=None, home=None, skills_dir=None, output=None, agent=None):
             print("symlink unavailable; copied skill to %s" % destination,
                   file=output)
 
-    config = home / ".baton-config"
-    config.write_text("base_dir=%s\n" % repo, encoding="utf-8")
-    try:
-        config.chmod(0o600)
-    except OSError:
-        pass
-    print("wrote %s (base_dir=%s)" % (config, repo), file=output)
+    # BATON_HOME is an explicit advanced/test storage override.  Explicit ``home``
+    # still owns host-skill and legacy-pointer locations, while normal installs use
+    # ~/.baton by default.
+    config_home = None if os.environ.get("BATON_HOME") else home
+    config = runtime.load_config(home=config_home, base_dir=repo)
+    config["base_dir"] = str(repo)
+    config = runtime.write_config(config, home=config_home, write_legacy=False)
+    runtime.atomic_write_bytes(
+        runtime.legacy_config_path(home),
+        ("base_dir=%s\n" % config["base_dir"]).encode("utf-8"),
+    )
+    state_note = "automatic handoff off" if not config["auto_handoff"] else "existing automatic handoff preserved"
+    print("wrote %s and %s (base_dir=%s; %s)" % (
+        runtime.config_path(config_home), runtime.legacy_config_path(home),
+        config["base_dir"], state_note), file=output)
     return destination, method
 
 
@@ -212,7 +346,7 @@ def main(argv=None):
         print("\nOptional Claude Code hook configuration. Merge this object into "
               "your Claude Code settings:")
         print("--- BEGIN BATON HOOK JSON ---")
-        print(json.dumps(hook_config(repo), indent=2, sort_keys=True))
+        print(json.dumps(hook_config(repo, agent="claude"), indent=2, sort_keys=True))
         print("--- END BATON HOOK JSON ---")
     print("\nRun the receiver-neutral relay with Python on any platform. "
           "tmux is optional; see README.md.")

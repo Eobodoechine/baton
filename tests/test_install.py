@@ -211,3 +211,95 @@ def test_auto_detection_does_not_default_to_claude(tmp_path, monkeypatch):
     monkeypatch.setattr(installer.shutil, "which", lambda _name: None)
     with pytest.raises(ValueError, match="could not detect"):
         installer._requested_agents(None, home)
+
+
+def test_install_writes_versioned_runtime_config_but_keeps_automation_off(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    installer.install(repo=ROOT, home=home, skills_dir=home / "skills")
+    config = json.loads((home / ".baton" / "config.json").read_text())
+    assert config["schema_version"] == 1
+    assert config["auto_handoff"] is False
+    assert config["agents"]["codex"]["enabled"] is False
+    assert (home / ".baton-config").read_text().startswith("base_dir=")
+
+
+def test_install_honors_explicit_baton_home_override(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    override = tmp_path / "runtime-override"
+    monkeypatch.setenv("BATON_HOME", str(override))
+    installer.install(repo=ROOT, home=home, skills_dir=home / "skills")
+    assert (override / "config.json").is_file()
+    assert not (home / ".baton" / "config.json").exists()
+    assert (home / ".baton-config").is_file()
+
+
+def test_hook_merge_preserves_unrelated_entries_and_is_idempotent(tmp_path):
+    home = tmp_path / "home"
+    settings = home / ".codex" / "hooks.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {
+        "PostToolUse": [{"hooks": [{"type": "command", "command": "owner-hook"}]}],
+    }}))
+    installer.merge_host_hooks(ROOT, "codex", home=home)
+    installer.merge_host_hooks(ROOT, "codex", home=home)
+    value = json.loads(settings.read_text())
+    commands = [command for entries in value["hooks"].values() for entry in entries
+                for command in installer._hook_commands(entry)]
+    assert commands.count("owner-hook") == 1
+    assert len([command for command in commands if "baton_gate.py" in command and
+                "--meter" in command]) == 1
+    assert (settings.with_name("hooks.json.baton-backup")).is_file()
+
+
+def test_hook_merge_refuses_malformed_json_without_overwrite(tmp_path):
+    home = tmp_path / "home"
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("not json")
+    with pytest.raises(ValueError, match="malformed JSON"):
+        installer.merge_host_hooks(ROOT, "claude", home=home)
+    assert settings.read_text() == "not json"
+
+
+def test_hook_uninstall_removes_only_baton_entries(tmp_path):
+    home = tmp_path / "home"
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {
+        "Stop": [{"hooks": [{"type": "command", "command": "owner-stop"}]}],
+    }}))
+    installer.merge_host_hooks(ROOT, "claude", home=home)
+    installer.remove_host_hooks(ROOT, "claude", home=home)
+    value = json.loads(settings.read_text())
+    commands = [command for entries in value["hooks"].values() for entry in entries
+                for command in installer._hook_commands(entry)]
+    assert commands == ["owner-stop"]
+
+
+def test_batonctl_global_enable_disable_and_project_override(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    runtime = tmp_path / "runtime"
+    project = tmp_path / "project"
+    (project / ".baton").mkdir(parents=True)
+    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), BATON_HOME=str(runtime))
+    ctl = ROOT / "scripts" / "batonctl.py"
+    enabled = subprocess.run([sys.executable, str(ctl), "auto", "enable", "--agent", "codex"],
+                             env=env, cwd=ROOT, capture_output=True, text=True)
+    assert enabled.returncode == 0, enabled.stderr
+    config = json.loads((runtime / "config.json").read_text())
+    assert config["auto_handoff"] and config["agents"]["codex"]["enabled"]
+    assert (home / ".codex" / "hooks.json").is_file()
+    disabled_project = subprocess.run(
+        [sys.executable, str(ctl), "auto", "disable", "--project", str(project)],
+        env=env, cwd=ROOT, capture_output=True, text=True)
+    assert disabled_project.returncode == 0
+    assert (project / ".baton" / "AUTO_HANDOFF_DISABLED").is_file()
+    disabled = subprocess.run([sys.executable, str(ctl), "auto", "disable", "--agent", "codex"],
+                               env=env, cwd=ROOT, capture_output=True, text=True)
+    assert disabled.returncode == 0, disabled.stderr
+    config = json.loads((runtime / "config.json").read_text())
+    assert config["auto_handoff"] is False
+    assert (home / ".codex" / "hooks.json").is_file()

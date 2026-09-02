@@ -23,7 +23,9 @@ import time
 BASE_DIR = Path(__file__).resolve().parents[1]
 HOOKS_DIR = BASE_DIR / "hooks"
 sys.path.insert(0, str(HOOKS_DIR))
+sys.path.insert(0, str(BASE_DIR))
 import baton_gate  # noqa: E402
+import baton_runtime as runtime  # noqa: E402
 
 
 PROVIDERS = ("auto", "codex", "claude", "custom")
@@ -87,6 +89,41 @@ BATON_RELAY_GEN={generation}, so the chain-depth cap remains intact. At {maximum
 chain stops and waits for a human.)""".format(
         path=path, generation=generation, maximum=maximum,
     )
+
+
+def manifest_data(root, baton, provider, generation, maximum, adapter):
+    """Build the host-facing v2 manifest from bytes already validated by relay."""
+    baton_hash = runtime.file_hash(baton)
+    headers = runtime.baton_headers(baton)
+    fingerprint = headers.get("Worktree-Fingerprint", "")
+    if headers.get("Baton-Version") == "2":
+        ok, message = runtime.verify_baton_state(baton, root)
+        if not ok:
+            raise baton_gate.BatonPointerError("repository state rejected: %s" % message)
+    handoff = runtime.handoff_id(root, baton_hash, generation, provider)
+    manual = format_command(adapter["interactive"])
+    receipt_backend = "codex-desktop" if provider == "codex" else "host"
+    receipt_argv = [sys.executable, str(BASE_DIR / "scripts" / "batonctl.py"),
+                    "receipt", "--handoff-id", handoff, "--provider", provider,
+                    "--backend", receipt_backend, "--task-id", "{task_id}"]
+    return {
+        "schema_version": 2,
+        "provider": provider,
+        "root": os.path.realpath(root),
+        "checkout_root": os.path.realpath(root),
+        "baton": str(baton),
+        "baton_hash": baton_hash,
+        "repository_state_fingerprint": fingerprint,
+        "prompt": relay_prompt(baton, generation, maximum),
+        "generation": generation,
+        "maximum_generation": maximum,
+        "detail": baton_tier(baton),
+        "handoff_id": handoff,
+        "successor_title": "Baton handoff %s" % handoff,
+        "backend_capability": "desktop-manifest" if provider == "codex" else "cli-launcher",
+        "receipt_recording_argv": receipt_argv,
+        "manual_fallback_command": manual,
+    }
 
 
 def _parse_nonnegative(value, name):
@@ -306,21 +343,47 @@ def _depth_refusal(adapter, generation, maximum):
     return 3
 
 
-def spawn(root, baton, adapter, generation, maximum):
+def spawn(root, baton, adapter, generation, maximum, manifest):
     if generation > maximum:
         return _depth_refusal(adapter, generation, maximum)
+
+    handoff = manifest["handoff_id"]
+    existing = runtime.successful_receipt(handoff)
+    if existing:
+        print("baton relay: recovered existing launch receipt for %s." % handoff)
+        return 0
 
     relay_dir = Path(root) / ".baton" / "relay"
     relay_dir.mkdir(parents=True, exist_ok=True)
     _prune(relay_dir)
     slug = re.sub(r"[^A-Za-z0-9]+", "-", Path(root).name).strip("-") or "project"
-    session = "baton-%s-%s-g%s-%s-%s" % (
-        slug, adapter["provider"], generation,
-        datetime.now().strftime("%H%M%S"), os.getpid())
+    session = "baton-%s-%s-g%s-%s" % (
+        slug, adapter["provider"], generation, handoff[:16])
     log = relay_dir / (session + ".log")
+    marker = relay_dir / (session + ".handoff")
     env = dict(os.environ, BATON_RELAY_GEN=str(generation),
                BATON_RELAY_MAX_GEN=str(maximum),
                BATON_RELAY_PROVIDER=adapter["provider"])
+    try:
+        runtime.write_launch_pending(handoff, adapter["provider"], {
+            "root": os.path.realpath(root), "baton": str(baton),
+            "baton_hash": manifest["baton_hash"],
+            "repository_state_fingerprint": manifest["repository_state_fingerprint"],
+            "session": session,
+        })
+    except OSError as exc:
+        print("baton relay: cannot write launch_pending state: %s" % exc, file=sys.stderr)
+        return 7
+    if marker.exists():
+        try:
+            owner = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            owner = ""
+        if owner != handoff:
+            print("baton relay: session collision belongs to another handoff", file=sys.stderr)
+            return 6
+    else:
+        runtime.atomic_write_bytes(marker, (handoff + "\n").encode("ascii"))
 
     tmux = shutil.which("tmux")
     if tmux:
@@ -332,13 +395,33 @@ def spawn(root, baton, adapter, generation, maximum):
             _tmux_spawn(tmux, os.path.realpath(root), session,
                         adapter["interactive"], log)
         except FileExistsError as exc:
-            print("baton relay: %s" % exc, file=sys.stderr)
-            return 6
+            try:
+                owner = marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                owner = ""
+            if owner != handoff:
+                print("baton relay: %s" % exc, file=sys.stderr)
+                return 6
+            runtime.record_receipt(handoff, adapter["provider"], "tmux",
+                                   session=session, root=os.path.realpath(root),
+                                   baton_hash=manifest["baton_hash"],
+                                   fingerprint=manifest["repository_state_fingerprint"],
+                                   recovered=True)
+            print("baton relay: recovered existing tmux successor %s." % session)
+            return 0
         except (OSError, subprocess.CalledProcessError) as exc:
             print("baton relay: tmux failed: %s" % exc, file=sys.stderr)
             return 7
-        _append_log(root, generation, maximum, session, baton, "tmux",
-                    adapter["provider"])
+        try:
+            receipt = runtime.record_receipt(
+                handoff, adapter["provider"], "tmux", session=session,
+                root=os.path.realpath(root), baton_hash=manifest["baton_hash"],
+                fingerprint=manifest["repository_state_fingerprint"])
+        except OSError as exc:
+            print("baton relay: successor exists but receipt write failed: %s" % exc,
+                  file=sys.stderr)
+            return 7
+        _append_log(root, generation, maximum, session, baton, "tmux", adapter["provider"])
         print("baton relay: successor started.\n")
         print("  provider   %s" % adapter["provider"])
         print("  backend    tmux")
@@ -350,6 +433,7 @@ def spawn(root, baton, adapter, generation, maximum):
         print("  cwd        %s" % root)
         print("  baton      %s" % baton)
         print("  log        %s" % log)
+        print("  receipt    %s" % runtime.receipt_path(handoff))
         print("\n  watch it   tmux attach -t %s" % session)
         if adapter["wait_warning"]:
             print("\nWILL WAIT FOR YOU:\n  %s" % adapter["wait_warning"])
@@ -371,6 +455,16 @@ def spawn(root, baton, adapter, generation, maximum):
     except OSError as exc:
         print("baton relay: detached spawn failed: %s" % exc, file=sys.stderr)
         return 7
+    try:
+        runtime.record_receipt(
+            handoff, adapter["provider"], "detached-headless", pid=pid,
+            session=session, root=os.path.realpath(root),
+            baton_hash=manifest["baton_hash"],
+            fingerprint=manifest["repository_state_fingerprint"])
+    except OSError as exc:
+        print("baton relay: successor exists but receipt write failed: %s" % exc,
+              file=sys.stderr)
+        return 7
     _append_log(root, generation, maximum, session, baton, "detached-headless",
                 adapter["provider"], pid)
     print("baton relay: successor started.\n")
@@ -383,6 +477,7 @@ def spawn(root, baton, adapter, generation, maximum):
     print("  cwd        %s" % root)
     print("  baton      %s" % baton)
     print("  log        %s" % log)
+    print("  receipt    %s" % runtime.receipt_path(handoff))
     print("\n  This backend is non-interactive; monitor the log above.")
     return 0
 
@@ -437,9 +532,13 @@ def main(argv=None):
         prompt = relay_prompt(baton, generation, maximum)
         model = os.environ.get("BATON_RELAY_MODEL", "")
         adapter = build_adapter(provider, root, baton, prompt, model)
+        manifest = manifest_data(root, baton, provider, generation, maximum, adapter)
     except ValueError as exc:
         print("baton relay: %s" % exc, file=sys.stderr)
         return 2
+    except baton_gate.BatonPointerError as exc:
+        print("baton relay: %s" % exc, file=sys.stderr)
+        return 5
     except FileNotFoundError as exc:
         print("baton relay: %s" % exc, file=sys.stderr)
         return 7
@@ -447,16 +546,18 @@ def main(argv=None):
     if args.mode == "manifest":
         if generation > maximum:
             return _depth_refusal(adapter, generation, maximum)
-        print(json.dumps({
-            "schema_version": 1,
-            "provider": provider,
-            "root": os.path.realpath(root),
-            "baton": str(baton),
-            "prompt": prompt,
-            "generation": generation,
-            "maximum_generation": maximum,
-            "detail": baton_tier(baton),
-        }, sort_keys=True))
+        try:
+            runtime.write_launch_pending(manifest["handoff_id"], provider, {
+                "root": manifest["root"], "baton": manifest["baton"],
+                "baton_hash": manifest["baton_hash"],
+                "repository_state_fingerprint": manifest["repository_state_fingerprint"],
+                "backend_capability": manifest["backend_capability"],
+            })
+        except OSError as exc:
+            print("baton relay: cannot write launch_pending state: %s" % exc,
+                  file=sys.stderr)
+            return 7
+        print(json.dumps(manifest, sort_keys=True))
         return 0
     if args.mode == "headless":
         if not adapter["headless"]:
@@ -475,6 +576,12 @@ def main(argv=None):
                   (provider, command[0]), file=sys.stderr)
             return 7
         try:
+            runtime.write_launch_pending(manifest["handoff_id"], provider, {
+                "root": manifest["root"], "baton": manifest["baton"],
+                "baton_hash": manifest["baton_hash"],
+                "repository_state_fingerprint": manifest["repository_state_fingerprint"],
+                "backend_capability": "exec",
+            })
             if os.name == "nt":
                 return subprocess.call(command, cwd=os.path.realpath(root))
             os.chdir(os.path.realpath(root))
@@ -482,7 +589,7 @@ def main(argv=None):
         except OSError as exc:
             print("baton relay: cannot start %s: %s" % (provider, exc), file=sys.stderr)
             return 7
-    return spawn(root, baton, adapter, generation, maximum)
+    return spawn(root, baton, adapter, generation, maximum, manifest)
 
 
 if __name__ == "__main__":

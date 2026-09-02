@@ -90,3 +90,19 @@ def test_repo_identity_must_match_when_relay_root_is_supplied(tmp_path):
     path = write(tmp_path)
     bad = lint.check(str(path), "brief", repo_root=str(tmp_path))
     assert any("does not match" in item for item in bad)
+
+
+def test_version_two_requires_every_repository_state_header(tmp_path):
+    body = valid_body().replace("# BATON — test", "# BATON — test\nBaton-Version: 2")
+    bad = lint.check(str(write(tmp_path, body)), "brief")
+    assert any("Head" in item for item in bad)
+    assert any("Worktree" in item for item in bad)
+
+
+def test_version_two_lints_with_complete_repository_state_headers(tmp_path):
+    body = valid_body().replace(
+        "# BATON — test",
+        "# BATON — test\nBaton-Version: 2\nHead: " + "a" * 40 +
+        "\nWorktree: dirty\nWorktree-Fingerprint: sha256:" + "b" * 64,
+    )
+    assert lint.check(str(write(tmp_path, body)), "brief") == []

@@ -163,6 +163,20 @@ def check(path, tier, repo_root=None):
     elif repo_root and os.path.realpath(repo.group(1).strip()) != os.path.realpath(repo_root):
         bad.append("header 'Repo:' does not match the repository being relayed")
 
+    version = re.search(r"^Baton-Version:\s*(\S+)\s*$", head, re.M)
+    if version and version.group(1) not in ("1", "2"):
+        bad.append("unsupported Baton-Version: %s" % version.group(1))
+    if version and version.group(1) == "2":
+        head_sha = re.search(r"^Head:\s*([0-9a-f]{40})\s*$", head, re.M)
+        worktree = re.search(r"^Worktree:\s*(clean|dirty)\s*$", head, re.M)
+        fingerprint = re.search(r"^Worktree-Fingerprint:\s*sha256:[0-9a-f]{64}\s*$", head, re.M)
+        if not head_sha:
+            bad.append("version-2 baton is missing a 40-character Head")
+        if not worktree:
+            bad.append("version-2 baton is missing Worktree: clean|dirty")
+        if not fingerprint:
+            bad.append("version-2 baton is missing a SHA-256 Worktree-Fingerprint")
+
     s5 = section(body, "## 5. USER'S WORDS")
     if '"' not in s5 and "none recorded" not in s5:
         bad.append("section 5 must hold a verbatim quote or the exact words "
@@ -205,6 +219,8 @@ def main():
 
     tier = CANON.get(tier, "teaching")
     bad = check(a.baton, tier, repo_root=a.repo_root)
+    if not re.search(r"^Baton-Version:\s*2\s*$", head, re.M):
+        print("WARNING: legacy version-1 baton: worktree fingerprint unavailable", file=sys.stderr)
     for b in bad:
         print("FAIL: %s" % b)
     if not bad:
