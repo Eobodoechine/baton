@@ -44,6 +44,10 @@ The baton pins the card by content hash — `Card: .baton/PROJECT_CARD.md @ a3f9
 If the on-disk hash differs, process drifted under the baton and the receiver's
 invariant check fails closed.
 
+The baton also names its owning repository — `Repo: /absolute/path/to/clone`. The
+shared resolver anchors linked worktrees to their owning clone and refuses to guess a
+directory outside Git. Pickup, status, and relay all use that resolver.
+
 The card is the **executable** layer; the project `CLAUDE.md` remains the narrative
 layer for humans and strong models. The card does not restate `CLAUDE.md` — it states
 literal commands with literal expected output.
@@ -58,7 +62,7 @@ this is consistent. Design docs like this one stay flat in `loop-team/`.
 <project-root>/.baton/
 |-- PROJECT_CARD.md                        # stable layer
 |-- BATON.md                               # volatile layer, current
-|-- BATON_CURRENT                          # one line: absolute path of active baton
+|-- BATON_CURRENT                          # one line: active baton path (contained below .baton)
 |-- batons.log                             # append-only cut/pickup ledger
 `-- archive/baton_YYYY-MM-DD[a-z]_<topic>.md
 ```
@@ -80,7 +84,7 @@ positions: first content block, and repeated verbatim as the final line.
 
 | # | Section | Budget | Mandatory | Trim order |
 |---|---|---|---|---|
-| 0 | Header + Trust Rule + `Card:` pin | 120 | YES | never |
+| 0 | Header + Trust Rule + `Card:` pin + `Repo:` line | 140 | YES | never |
 | 1 | `## 1. DO THIS NOW` | 150 | YES | never |
 | 2 | `## 2. WHERE YOU ARE — invariant check` | 180 | YES | never |
 | 3 | `## 3. THE TASK — numbered steps` (<=10) | 700 | YES | never |
@@ -141,6 +145,7 @@ the pass-verdict phrasing that `hooks/loop_stop_guard.py` pattern-matches (see �
 # BATON — planckeck tier-1 hash capture (cut 2026-08-25 16:40)
 Chain: 2 / Parent: .baton/archive/baton_2026-08-24a_planckeck.md
 Receiver tier: haiku
+Repo: /Users/eobodoechine/Claude/loop
 Card: .baton/PROJECT_CARD.md @ a3f9c1d2
 Trust rule: This file is a summary. Anything tagged [S] is summary-derived —
 verify it against the repo before acting on it.
@@ -246,8 +251,9 @@ The model's own estimate of its context usage is unreliable and is never used.
 
 ## 6. Automation
 
-`hooks/baton_gate.py`, argv-flag dispatched, registered in the **live**
-`~/.claude/settings.json`.
+`hooks/baton_gate.py` is argv-flag dispatched and may be registered in
+`~/.claude/settings.json`. `install.py` prints guarded commands for the current
+platform; hooks remain optional.
 
 > **Trap:** `~/.claude/hooks/{session_init,user_prompt_submit,pre_tool_use}.py` are
 > inert duplicates. Nothing references them; the live copies run from the model-router
@@ -282,14 +288,14 @@ that as a *blocking* error, wedging a tool call. Caught in the wild 2026-08-25.
 `if` form exits 0 when the file is missing and preserves the exit code when it is not.
 `hooks/test_baton_gate.py` asserts both halves.
 
-### The relay (`scripts/baton_next.sh --spawn`)
+### The relay (`python scripts/baton_next.py --spawn`)
 
 **Superseded 2026-08-26.** This spec previously said spawning the successor could not be
 automated. That is true only of spawning a session *inside* Claude Code's own process. A
-skill step is a shell command, and that command can start an external `claude`. `--spawn`
-launches the successor as a **detached tmux session**, so it starts immediately, survives
-the parent terminal closing, and stays attachable (`tmux attach -t <name>`) — a real chat
-the human can watch, interject in, or kill.
+skill step can start an external `claude`. The relay core is Python 3.9+ so validation,
+path containment, quoting, and exit codes are shared across macOS, Linux, and Windows.
+When tmux exists, `--spawn` launches an attachable session. Without tmux, it launches a
+detached headless receiver only when an explicit permission mode is configured.
 
 The relay is wired to **`/baton cut` STEP 5 only**. Session `Stop` does not relay. A
 session hands off when a cut was actually asked for, never as a side effect of ending.
@@ -303,11 +309,12 @@ session hands off when a cut was actually asked for, never as a side effect of e
 Generation is carried in the child's environment, not on disk, so it **self-resets**: a
 human-started session is always generation 0 and cannot inherit a stale counter.
 
-`--spawn` **refuses rather than guesses**, with distinct exit codes: `1` no baton, `3`
-depth cap, `4` no tmux (prints the command instead), `5` baton missing a mandatory
-section, `6` session-name collision. Exit 5 is the important one — it is the last gate
-before an unattended session inherits a half-written document. Each spawn appends a
-`relay` line to `.baton/batons.log` and tees the pane to `.baton/relay/<session>.log`.
+`--spawn` **refuses rather than guesses**, with distinct exit codes: `1` no baton, `2`
+invalid settings, `3` depth cap, `4` safe manual fallback required, `5` unsafe pointer
+or invalid baton, `6` session collision, and `7` backend failure. Every mode runs the
+structural linter before starting or printing a receiver command. Each successful spawn
+appends a backend-labelled line to `.baton/batons.log`; detached output goes to
+`.baton/relay/<session>.log`.
 
 The relay does not weaken the architectural rule. It **starts a model and points it at a
 file a model wrote**; it never generates baton prose.
@@ -322,13 +329,26 @@ run would have shown, and `--spawn` now warns about both:
    does **not** trust the child directory — `Claude/Projects/ai-os` had
    `hasTrustDialogAccepted: false` while `~` had `true`. Cost is one Enter, once per
    project, forever.
-2. **Without a permission mode the successor stalls at the first approval prompt.**
-   `BATON_RELAY_PERMISSION_MODE=acceptEdits` completed the same baton with zero human
-   touches. Unset remains the default: a relay that waits is safer than one that does not.
+2. **Without a permission mode an interactive successor can stall at the first approval
+   prompt.** A headless fallback is therefore never detached unless
+   `BATON_RELAY_PERMISSION_MODE` is explicitly set. Otherwise exit 4 prints the manual
+   command.
 
 Trust is recorded in `~/.claude.json` under the **realpath** of the root
 (`/private/tmp/...`, not `/tmp/...`), so `--spawn` normalises the root before both the
 trust check and the child's `cd`.
+
+### Portability contract
+
+- Core runtime: Python 3.9+ standard library and Git.
+- Supported CI matrix: macOS, Linux, and Windows on the oldest and newest supported
+  Python versions.
+- Convenience wrappers: Bash on POSIX and PowerShell on Windows. The wrappers contain
+  no state or validation logic.
+- Optional capability: tmux provides an attachable relay; it is not required for
+  status, cut, lint, pickup, manual continuation, or guarded headless relay.
+- Platform-specific features must degrade with a named exit code and a manual command,
+  never by guessing paths or silently skipping validation.
 
 **Graceful degradation:** with zero hooks wired the skill is fully functional by hand.
 Hooks add measurement, nagging, gating, and auto-pickup — nothing else.

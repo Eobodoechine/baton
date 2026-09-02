@@ -1,6 +1,7 @@
 # BATON — {{TOPIC}} (cut {{YYYY-MM-DD HH:MM}})
 Chain: {{N}} / Parent: {{PARENT_PATH_OR_none}}
 Detail tier: {{teaching|brief}}   # a DETAIL budget, not a model choice
+Repo: {{ABSOLUTE_PATH_OF_THE_OWNING_CLONE}}
 Card: .baton/PROJECT_CARD.md @ {{CARD_HASH8}}
 Trust rule: This file is a summary. Anything tagged [S] is summary-derived —
 verify it against the repo before acting on it.

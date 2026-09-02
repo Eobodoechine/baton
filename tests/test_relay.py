@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Offline relay tests. No model process or real tmux session is started."""
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RELAY = ROOT / "scripts" / "baton_next.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+import baton_next as relay  # noqa: E402
+
+
+def valid_body(root="/tmp/example"):
+    return """# BATON — relay test
+Detail tier: brief
+Repo: {root}
+Card: .baton/PROJECT_CARD.md @ deadbeef
+Trust rule: verify this file against the repository.
+
+## 1. DO THIS NOW
+Run: python -m pytest
+Expected: green
+
+## 2. WHERE YOU ARE
+Run: git status
+
+## 3. THE TASK
+1. Do the work.
+
+## 4. DO NOT RETRY
+none
+
+## 5. USER'S WORDS
+none recorded
+
+## 6. RULES THAT BIND THIS TASK
+- Stay in scope.
+
+## 11. DONE MEANS
+python -m pytest exits zero. REPEAT: python -m pytest
+""".format(root=root)
+
+
+def project(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".baton").mkdir()
+    (root / ".baton" / "BATON.md").write_text(valid_body(str(root)))
+    return root
+
+
+def run(root, *args, env=None):
+    merged = dict(os.environ, HOME=str(root / "home"))
+    (root / "home").mkdir(exist_ok=True)
+    merged.update(env or {})
+    return subprocess.run(
+        [sys.executable, str(RELAY), *args], cwd=root, env=merged,
+        capture_output=True, text=True,
+    )
+
+
+def test_headless_prints_a_shell_escaped_command(tmp_path):
+    root = project(tmp_path)
+    result = run(root, "--headless")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("claude -p ")
+    assert "BATON.md" in result.stdout
+
+
+def test_command_formatting_supports_windows_and_posix():
+    args = ["claude", "a path with spaces", 'a "quote"']
+    assert relay.format_command(args, windows=False).startswith("claude ")
+    assert relay.format_command(args, windows=True).startswith("claude ")
+    assert "a path with spaces" in relay.format_command(args, windows=True)
+
+
+def test_relay_refuses_pointer_outside_repository(tmp_path):
+    root = project(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text(valid_body(str(root)))
+    (root / ".baton" / "BATON_CURRENT").write_text(str(outside))
+    result = run(root, "--headless")
+    assert result.returncode == 5
+    assert "outside" in result.stderr
+
+
+def test_relay_uses_linter_not_substring_presence(tmp_path):
+    root = project(tmp_path)
+    baton = root / ".baton" / "BATON.md"
+    baton.write_text(valid_body(str(root)).replace(
+        "## 4. DO NOT RETRY\nnone",
+        "## 9. GOTCHAS\n```markdown\n## 4. DO NOT RETRY\n```",
+    ))
+    result = run(root, "--headless")
+    assert result.returncode == 5
+    assert "missing mandatory section: ## 4" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake tmux fixture is POSIX-only")
+def test_spawn_uses_fake_tmux_and_never_starts_a_real_model(tmp_path):
+    root = project(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "tmux-calls"
+    tmux = fake_bin / "tmux"
+    tmux.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"$FAKE_TMUX_CALLS\"\n"
+        "[ \"${1:-}\" = has-session ] && exit 1\n"
+        "exit 0\n"
+    )
+    tmux.chmod(0o755)
+    result = run(root, "--spawn", env={
+        "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+        "FAKE_TMUX_CALLS": str(calls),
+    })
+    assert result.returncode == 0, result.stderr
+    assert "successor started" in result.stdout
+    assert "new-session" in calls.read_text()
+    assert "\trelay\t" in (root / ".baton" / "batons.log").read_text()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="PATH isolation fixture is POSIX-only")
+def test_spawn_without_tmux_refuses_an_invisible_wait(tmp_path):
+    root = project(tmp_path)
+    result = run(root, "--spawn", env={"PATH": "/usr/bin:/bin"})
+    assert result.returncode == 4
+    assert "refusing to detach" in result.stderr
+    assert "claude" in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake executable fixture is POSIX-only")
+def test_spawn_without_tmux_can_use_explicit_headless_backend(tmp_path):
+    root = project(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    claude = fake_bin / "claude"
+    claude.write_text("#!/bin/sh\necho fake-claude-finished\n")
+    claude.chmod(0o755)
+    result = run(root, "--spawn", env={
+        "PATH": str(fake_bin) + ":/usr/bin:/bin",
+        "BATON_RELAY_PERMISSION_MODE": "acceptEdits",
+    })
+    assert result.returncode == 0, result.stderr
+    assert "detached-headless" in result.stdout
+    assert "backend=detached-headless" in (
+        root / ".baton" / "batons.log").read_text()

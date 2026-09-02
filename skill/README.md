@@ -1,46 +1,38 @@
-# baton — session handoff
+# Baton skill
 
-Cuts a small, self-contained document that lets a fresh session — possibly a
-Haiku-class model with no context — continue work exactly where it stopped.
-
-## Two layers
-
-| Layer | File | Changes |
-|---|---|---|
-| Stable | `<project>/.baton/PROJECT_CARD.md` | only when the process changes |
-| Volatile | `<project>/.baton/BATON.md` | every cut |
-
-The baton pins the card by hash. If they drift apart, the receiver's invariant check
-fails closed and it halts rather than improvising.
-
-This split exists for a measured reason: weak models' accuracy falls off exponentially
-in the *number* of simultaneous instructions, so standing rules must not ride in the
-per-task document.
+Baton hands unfinished work to a fresh, contextless session through a mechanically
+checkable document. The stable project rules live in `.baton/PROJECT_CARD.md`; the
+current task lives in `.baton/BATON.md` and pins the card by hash.
 
 ## Commands
 
-| Command | Does |
+| Command | Action |
 |---|---|
-| `/baton cut [--tier haiku\|frontier]` | Write the baton, archive it, print the successor command |
-| `/baton pickup` | Read the pending baton and continue |
+| `/baton cut [--tier teaching\|brief]` | Validate, archive, and relay one task |
+| `/baton pickup` | Validate and read the pending baton |
 | `/baton card` | Update the stable layer after a process change |
-| `/baton status` | Report: pending baton, age, card drift, whether a cut is due |
+| `/baton status` | Report pending baton, age, card drift, pointer validity, and due state |
 
-## Without hooks
+Tiers control detail, not the receiver model. `teaching` is the 5,000-token default;
+`brief` is the 2,500-token budget for genuinely small tasks.
 
-Fully functional by hand. `cut` writes the files; `pickup` reads them. Hooks only add
-measurement (`--meter`), the due notice (`--nag`), the Stop gate in armed loop runs
-(`--gate`), and auto-announcement at session start (`--pickup`).
+## Platform support
 
-## The one manual step
+The core requires Python 3.9+ and Git and runs on macOS, Linux, and Windows. POSIX
+`.sh` and Windows PowerShell wrappers are conveniences; status, validation,
+installation, and relay logic live in Python.
 
-Claude Code cannot spawn the successor session from a hook. Run:
+tmux is optional. With tmux, an auto-spawned successor is attachable. Without tmux,
+Baton can start a detached headless successor only when
+`BATON_RELAY_PERMISSION_MODE` is explicitly set; otherwise it prints the manual
+command and refuses an invisible wait.
 
-```bash
-scripts/baton_next.sh
-```
+Hooks are optional. They add context measurement, due notices, a bounded Stop gate in
+armed Loop runs, and safe pickup announcements. Manual cut and pickup remain usable
+without hooks.
 
 ## Contract
 
-`SPEC.md` at the root of this repo. The skill live-reads it; this README does not
-restate it.
+The authoritative schema and exit codes are in `SPEC.md` at the installed checkout.
+Mandatory headings and the `Repo:`, `Card:`, and `Trust rule:` header fields are
+structural. Examples inside comments or fenced code do not satisfy them.

@@ -9,15 +9,23 @@ work isn't done.
 
 ## Quick start
 
+Requires Git and Python 3.9 or newer. Clone the repo, then run the platform-neutral
+installer:
+
 ```sh
 git clone https://github.com/Eobodoechine/baton.git
-cd baton && ./install.sh
+cd baton
+python3 install.py          # macOS/Linux
+py -3 install.py            # Windows
 ```
 
-`install.sh` symlinks `skill/` into `~/.claude/skills/baton` and prints the hook config
-for you to paste. It refuses to clobber an existing install, and it never writes to your
-`settings.json` itself, because a bad hook registration wedges tool calls and that is not
-a thing to do to someone's config unasked.
+`install.sh` and `install.ps1` are convenience wrappers around the same Python
+installer.
+
+The installer links `skill/` into `~/.claude/skills/baton` and prints valid hook JSON
+for you to merge. If directory symlinks are unavailable (common on Windows without
+Developer Mode), it creates a clearly marked copy instead. It refuses to clobber an
+existing install and never edits `settings.json`.
 
 Hooks are entirely optional. With zero hooks wired the skill works fully by hand.
 
@@ -59,9 +67,9 @@ live-reads it and never restates it.
 
 ## Making it yours
 
-There is no config file, and that is deliberate. The thing you customise is the **stable
-layer**, `.baton/PROJECT_CARD.md`, one per project. It is the executable companion to
-your `CLAUDE.md`: literal commands with literal expected output, not narrative.
+There is no per-project configuration language. The installer writes only
+`~/.baton-config`, a location pointer to this checkout. The thing you customise is the
+**stable layer**, `.baton/PROJECT_CARD.md`, one per project.
 
 `/baton card` scaffolds it from [`skill/templates/project_card.md`](skill/templates/project_card.md).
 Fill in four things and the rest of the system gets sharper:
@@ -81,14 +89,14 @@ The baton pins the card by content hash, so if the card moved underneath a pendi
 baton, the receiver fails closed rather than working off stale instructions. That is
 also the failure mode to expect first if a pickup refuses.
 
-Rewrite the template's wording freely. It is a starting shape, not a schema, and nothing
-parses those headings.
+Rewrite the template's prose freely, but keep the mandatory headings and header fields.
+Pickup and relay parse them structurally and ignore lookalikes inside comments or fenced
+examples.
 
 ## The relay (auto-spawn)
 
-`/baton cut` ends by running `scripts/baton_next.sh --spawn`, which starts the successor
-as a **detached tmux session** — it begins immediately, survives the parent terminal
-closing, and stays attachable:
+`/baton cut` ends by running `python scripts/baton_next.py --spawn`. When tmux is
+available, it starts the successor as a detached, attachable tmux session:
 
 ```
 tmux attach -t baton-<project>-g1-143022    # watch or interject; ctrl-b d to detach
@@ -100,15 +108,23 @@ child's *environment*, not on disk, so it self-resets: a session you start by ha
 always generation 0 and cannot inherit a stale counter. At the cap, `--spawn` refuses
 and prints the manual command.
 
-`--spawn` refuses rather than guesses: `1` no baton, `3` depth cap, `4` no tmux (prints
-the command instead), `5` baton missing a mandatory section, `6` session-name collision.
+Without tmux, Baton has two safe behaviors on every platform:
+
+- If `BATON_RELAY_PERMISSION_MODE` is set, it starts a detached headless successor and
+  prints its PID and log path.
+- If the permission mode is unset, it refuses to create a process that may wait
+  invisibly, prints the manual command, and exits 4.
+
+Relay exits are stable: `1` no baton, `2` invalid relay settings, `3` depth cap, `4`
+manual fallback required, `5` unsafe or invalid baton, `6` session collision, and `7`
+backend launch failure.
 
 **Two things park a successor before it does any work**, and `--spawn` warns about both:
 
 1. **Folder trust is per-directory.** The child stops at Claude Code's *"Is this a
    project you trust?"* prompt before it reads the baton. Running `claude` from a parent
    directory does **not** trust a subdirectory. One Enter, once per project.
-2. **Without a permission mode, it stalls at the first approval prompt.** Set
+2. **Without a permission mode, an interactive successor may stall at the first approval prompt.** Set
    `BATON_RELAY_PERMISSION_MODE=acceptEdits` for an unattended relay. Unset is the
    default, because a relay that waits is safer than one that doesn't.
 
@@ -147,8 +163,9 @@ is absent.
 SPEC.md                  the contract; the skill live-reads it
 skill/                   the /baton skill (SKILL.md, templates, status script)
 hooks/baton_gate.py      context meter, nag, Stop gate, pickup announcer
-hooks/test_baton_gate.py 42 tests
-scripts/baton_next.sh    the relay
+hooks/baton_status.py    portable JSON status
+scripts/baton_next.py    cross-platform relay core
+install.py               cross-platform installer
 evals/                   linter, fixtures, receiver grader, the null-result eval
 ```
 
@@ -170,8 +187,13 @@ One test skips when `loop_stop_guard.py` is absent, which is the normal standalo
 ## Tests
 
 ```sh
-python3 -m pytest hooks/test_baton_gate.py -q
+python -m pip install pytest
+python -m pytest -q -p no:cacheprovider
 ```
+
+CI runs the offline suite on macOS, Linux, and Windows with Python 3.9 and 3.13.
+Paid receiver evaluations are deliberately separate and never run in CI. See
+[`docs/TESTING.md`](docs/TESTING.md).
 
 ## License
 

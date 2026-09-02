@@ -35,7 +35,8 @@ def gate(tmp_path, monkeypatch):
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     root = tmp_path / "proj"
-    (root / ".git").mkdir(parents=True)
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
     (root / ".baton").mkdir()
     monkeypatch.chdir(root)
     return root
@@ -52,7 +53,9 @@ def transcript(tmp_path, **usage):
 
 
 def write_baton(root, complete=True):
-    body = ["# BATON — test", "Card: .baton/PROJECT_CARD.md @ deadbeef"]
+    body = ["# BATON — test", "Repo: %s" % root,
+            "Card: .baton/PROJECT_CARD.md @ deadbeef",
+            "Trust rule: verify this file against the repository."]
     sections = list(bg.MANDATORY_SECTIONS)
     if not complete:
         sections = sections[:-1]
@@ -70,6 +73,37 @@ def run(mode, payload, env=None):
         [sys.executable, os.path.join(HOOKS, "baton_gate.py"), mode],
         input=json.dumps(payload), capture_output=True, text=True, env=e,
     )
+
+
+# --- project identity -------------------------------------------------------
+
+def test_project_root_resolves_from_a_nested_directory(project):
+    nested = project / "a" / "b"
+    nested.mkdir(parents=True)
+    assert bg.project_root(str(nested)) == str(project)
+
+
+def test_project_root_refuses_to_guess_outside_git(tmp_path):
+    with pytest.raises(bg.BatonRootError):
+        bg.project_root(str(tmp_path))
+
+
+def test_linked_worktree_resolves_to_its_owning_clone(tmp_path):
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    subprocess.run(["git", "init", "-q", str(owner)], check=True)
+    (owner / "tracked").write_text("one")
+    subprocess.run(["git", "-C", str(owner), "add", "tracked"], check=True)
+    subprocess.run([
+        "git", "-C", str(owner), "-c", "user.name=Baton Test",
+        "-c", "user.email=baton@example.invalid", "commit", "-qm", "initial",
+    ], check=True)
+    worktree = tmp_path / "worktree"
+    subprocess.run([
+        "git", "-C", str(owner), "worktree", "add", "-q", "-b",
+        "baton-test-worktree", str(worktree),
+    ], check=True)
+    assert bg.project_root(str(worktree)) == str(owner)
 
 
 # --- context measurement ----------------------------------------------------
@@ -172,8 +206,39 @@ def test_baton_rejects_unfilled_placeholders(project):
     assert bg.baton_is_valid(str(p)) is False
 
 
+@pytest.mark.parametrize("placeholder", ["{{next_action}}", "TODO", "TBD"])
+def test_baton_rejects_every_template_placeholder_form(project, placeholder):
+    p = write_baton(project)
+    p.write_text(p.read_text() + "\n%s\n" % placeholder)
+    assert bg.baton_is_valid(str(p)) is False
+
+
+def test_baton_rejects_a_mandatory_heading_only_quoted_in_a_fence(project):
+    p = write_baton(project)
+    body = p.read_text().replace(
+        "## 4. DO NOT RETRY\nreal content here",
+        "## 9. GOTCHAS\n```markdown\n## 4. DO NOT RETRY\n```",
+    )
+    p.write_text(body)
+    assert bg.baton_is_valid(str(p)) is False
+
+
+def test_baton_rejects_an_empty_mandatory_section(project):
+    p = write_baton(project)
+    p.write_text(p.read_text().replace(
+        "## 4. DO NOT RETRY\nreal content here", "## 4. DO NOT RETRY"))
+    assert bg.baton_is_valid(str(p)) is False
+
+
 def test_complete_baton_is_valid(project):
-    assert bg.baton_is_valid(str(write_baton(project))) is True
+    assert bg.baton_is_valid(str(write_baton(project)), expected_root=str(project)) is True
+
+
+def test_baton_rejects_a_different_repository_identity(project, tmp_path):
+    p = write_baton(project)
+    p.write_text(p.read_text().replace("Repo: %s" % project,
+                                       "Repo: %s" % tmp_path))
+    assert bg.baton_is_valid(str(p), expected_root=str(project)) is False
 
 
 # --- nag --------------------------------------------------------------------
@@ -196,6 +261,25 @@ def test_nag_stops_once_a_baton_exists(project, gate, capsys):
     write_baton(project)
     bg.mode_nag({"session_id": "s8"})
     assert capsys.readouterr().out == ""
+    assert not (gate / "s8_baton_due").exists()
+
+
+def test_cut_closes_due_cycle_without_immediately_rearming(project, gate, tmp_path):
+    flagged = time.time() - 60
+    (gate / "cycle_baton_due").write_text("%d soft:141k\n" % flagged)
+    write_baton(project)
+
+    assert bg.mode_gate({"session_id": "cycle"}) == 0
+    assert not (gate / "cycle_baton_due").exists()
+    assert (gate / "cycle_baton_ack").exists()
+
+    bg.mode_meter({
+        "session_id": "cycle",
+        "transcript_path": transcript(tmp_path, input_tokens=bg.HARD_TRIGGER),
+        "tool_name": "Read",
+        "tool_input": {"file_path": "/after-cut"},
+    })
+    assert not (gate / "cycle_baton_due").exists()
 
 
 # --- stop gate --------------------------------------------------------------
@@ -248,10 +332,12 @@ def test_pickup_announces_then_consumes_the_pointer(project, capsys):
     b = write_baton(project)
     pointer = project / ".baton" / "BATON_CURRENT"
     pointer.write_text(str(b))
+    original = b.read_bytes()
     bg.mode_pickup({"session_id": "sF"})
     assert "Active baton" in capsys.readouterr().out
     assert not pointer.exists()
-    assert "Picked-up:" in b.read_text()
+    assert b.read_bytes() == original
+    assert "pickup session=sF" in (project / ".baton" / "batons.log").read_text()
 
     bg.mode_pickup({"session_id": "sG"})     # second session: nothing left to pick up
     assert capsys.readouterr().out == ""
@@ -274,6 +360,65 @@ def test_pickup_line_stays_small(project, capsys):
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
     assert len(ctx) <= 200
     assert "## 3. THE TASK" not in ctx      # the body never rides in additionalContext
+
+
+def test_pickup_refuses_pointer_outside_the_repository(project, tmp_path, capsys):
+    outside = tmp_path / "outside.md"
+    outside.write_text(write_baton(project).read_text())
+    before = outside.read_bytes()
+    pointer = project / ".baton" / "BATON_CURRENT"
+    pointer.write_text(str(outside))
+
+    bg.mode_pickup({"session_id": "outside"})
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "outside" in captured.err
+    assert pointer.exists()
+    assert outside.read_bytes() == before
+
+
+def test_pickup_refuses_invalid_pointer_target(project, capsys):
+    invalid = project / ".baton" / "archive" / "thin.md"
+    invalid.parent.mkdir()
+    invalid.write_text("# not a baton\n")
+    pointer = project / ".baton" / "BATON_CURRENT"
+    pointer.write_text(str(invalid))
+
+    bg.mode_pickup({"session_id": "thin"})
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "invalid baton" in captured.err
+    assert pointer.exists()
+
+
+def test_pickup_refuses_symlink_target(project, tmp_path, capsys):
+    target = write_baton(project)
+    link = project / ".baton" / "archive-link.md"
+    link.symlink_to(target)
+    pointer = project / ".baton" / "BATON_CURRENT"
+    pointer.write_text(str(link))
+
+    bg.mode_pickup({"session_id": "link"})
+
+    assert capsys.readouterr().out == ""
+    assert pointer.exists()
+
+
+def test_relative_pointer_is_resolved_inside_baton_directory(project):
+    archive = project / ".baton" / "archive"
+    archive.mkdir()
+    target = archive / "cut.md"
+    target.write_text(write_baton(project).read_text())
+    (project / ".baton" / "BATON_CURRENT").write_text("archive/cut.md")
+    assert bg.resolve_baton_pointer(str(project)) == str(target.resolve())
+
+
+def test_forged_session_id_cannot_escape_gate_directory(gate, tmp_path):
+    path = bg._flag("../../escaped", "baton_due")
+    assert os.path.commonpath([str(gate), os.path.realpath(path)]) == str(gate)
+    assert ".." not in os.path.basename(path)
 
 
 # --- compaction -------------------------------------------------------------
@@ -396,6 +541,7 @@ def test_registrations_are_existence_guarded():
             "absent: %s" % c)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook registration syntax")
 def test_guard_exits_zero_when_the_hook_file_is_absent():
     r = subprocess.run(
         ["sh", "-c", "if [ -f /nonexistent/baton_gate.py ]; then "
@@ -404,6 +550,7 @@ def test_guard_exits_zero_when_the_hook_file_is_absent():
     assert r.returncode == 0
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook registration syntax")
 def test_guard_still_lets_the_stop_gate_block(project, gate):
     """A plain `|| true` would swallow --gate's intentional exit 2. The `if` form
     must not."""

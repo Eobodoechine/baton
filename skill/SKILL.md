@@ -2,7 +2,7 @@
 name: baton
 description: >
   Session handoff. Cuts a "baton" — a small, self-contained document that lets a
-  fresh, contextless session (possibly a Haiku-class model) continue this work
+  fresh, contextless session (possibly a different model or platform) continue this work
   exactly where it stopped. Also picks up a baton left by a previous session.
 when_to_use: >
   Use when a session is ending, running long, or crossing the context threshold and
@@ -32,8 +32,10 @@ longer the goal — verifiability and explanation are.
 **STEP -1 — Load the contract (do this before anything else):**
 
 Read `~/.baton-config`. Extract its `base_dir=` line (expand `~`) as `BASE_DIR`.
-If the file does not exist, default `BASE_DIR` to `~/.baton-home` (where `install.sh`
-puts this repo).
+If the file does not exist, resolve this installed skill: a symlink points into
+`<BASE_DIR>/skill`; a copied installation has `.baton-install.json` whose `source`
+points there. If neither identifies a checkout, use the local templates only and say
+that status, lint, and relay are unavailable. Never guess a base directory.
 
 Read `<BASE_DIR>/SPEC.md` fresh from disk. **That file is the
 contract; this skill never restates it.** If it does not exist, fall back to
@@ -42,12 +44,12 @@ standalone.
 
 **STEP 0 — Resolve the project and read state:**
 
-Run `scripts/baton_status.sh` from this skill directory. It returns JSON:
+Run `<BASE_DIR>/hooks/baton_status.py` with Python 3.9 or newer. It returns JSON:
 
 ```json
 {"root":"...","current_baton":"...","age_hours":3.2,"card":"...",
- "card_hash":"a3f9c1d2","card_hash_matches":true,"mandatory_sections_filled":true,
- "due_flag":true,"context_tokens":147519}
+ "card_hash":"a3f9c1d2","card_hash_matches":true,"pointer_valid":true,
+ "mandatory_sections_filled":true,"due_flag":true,"due_scope":"all_sessions"}
 ```
 
 Branch on it. `root` is the project root; the two layers live at
@@ -76,7 +78,8 @@ If the card exists but you violated or discovered a standing rule this session, 
 so and offer `card` (below). Do not silently edit it.
 
 **STEP 3 — Write `<root>/.baton/BATON.md`** from `templates/baton.md`, following the
-schema in `BATON_SPEC.md`. Budget: **5,000 tokens** (`--tier teaching`, the default,
+schema in `SPEC.md`. Include `Repo: <absolute owning repository path>` in the header.
+Budget: **5,000 tokens** (`--tier teaching`, the default,
 which includes §10 Decisions + Why) or **2,500** (`--tier brief`, §10 omitted, for a
 task that genuinely is small).
 
@@ -116,24 +119,23 @@ task. Do not copy the card wholesale; that is the whole point of having two laye
 Under budget pressure, trim in this order: §10, §7, §9, §8. Never trim §1–§6 or §11.
 
 **STEP 4 — Verify and archive.** Run
-`<BASE_DIR>/evals/lint_baton.py <root>/.baton/BATON.md`
+`python <BASE_DIR>/evals/lint_baton.py <root>/.baton/BATON.md`
 if it exists. Copy the baton to `<root>/.baton/archive/baton_YYYY-MM-DD_<topic>.md`,
 write its absolute path into `<root>/.baton/BATON_CURRENT`, and append a line to
 `<root>/.baton/batons.log`.
 
 **STEP 5 — Hand over by starting the successor.** Run
-`<BASE_DIR>/scripts/baton_next.sh --spawn`. It launches the next session as a detached
-tmux session on this machine, in the project root, with the model its `Receiver tier:`
-line calls for, and prints the session name.
+`python <BASE_DIR>/scripts/baton_next.py --spawn`. The detail tier never chooses a
+model. The successor inherits the configured model unless `BATON_RELAY_MODEL` is set.
+With tmux it launches an attachable session; without tmux it uses a detached headless
+backend only when `BATON_RELAY_PERMISSION_MODE` is explicitly set.
 
-Report to the user: the tmux session name, the relay generation, and the `tmux attach`
-line. The successor is **already running** — say that plainly, so the user knows work is
-in flight and can attach or kill it.
+Report the backend, relay generation, and either the `tmux attach` line or the detached
+PID and log path. Say that the successor is running only after exit 0.
 
-**If the output contains a `WILL WAIT FOR YOU:` block, repeat it verbatim.** Those are
-the two things that park a successor before it does any work — an untrusted folder, and
-no permission mode — and both are silent from the user's side. A relay that is stalled
-at a prompt looks identical to one that is thinking.
+**If the output contains a `WILL WAIT FOR YOU:` block, repeat it verbatim.** An
+interactive tmux successor may be parked at trust or approval prompts. A detached
+headless relay is never started without an explicit permission mode.
 
 `--spawn` refuses rather than guessing. Read its exit code and relay the reason:
 
@@ -141,10 +143,12 @@ at a prompt looks identical to one that is thinking.
 |---|---|---|
 | 0 | spawned | session name + `tmux attach -t <name>` |
 | 1 | no baton on disk | the cut did not land; do not retry blindly, find out why |
+| 2 | invalid root or relay settings | correct the named setting; do not guess |
 | 3 | relay depth cap hit | the chain stopped on purpose; it printed the manual command |
-| 4 | no tmux | it printed the command instead; the user starts it by hand |
-| 5 | baton missing a mandatory section | **fix the baton** — do not force the spawn |
+| 4 | safe manual fallback required | it printed the command; the user starts it by hand |
+| 5 | unsafe pointer or invalid baton | **fix the baton** — do not force the spawn |
 | 6 | session name collision | a successor is already running; do not spawn a second |
+| 7 | launch backend failed | report the exact error and log path; do not claim it started |
 
 Never work around a refusal by invoking `claude` directly. Each exit above is a
 deliberate stop, and exit 5 in particular means an unattended session was about to
@@ -178,8 +182,10 @@ intended behavior: process changed under them.
 
 ## `status` — report
 
-Run `scripts/baton_status.sh` and summarize: is a baton pending, how old, does the
-card hash still match, how full is the context, is a cut due.
+Run `python <BASE_DIR>/hooks/baton_status.py` and summarize: is a baton pending, is its
+pointer safe, how old is it, does the card hash match, and is a cut due. When
+`due_scope` is `all_sessions`, say that the due flag is machine-wide rather than
+claiming it belongs to this project.
 
 ---
 

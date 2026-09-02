@@ -120,6 +120,7 @@ cat > .baton/BATON.md <<BATON
 # BATON — fieldnorm normalize_key (cut 2026-08-25 12:00)
 Chain: 1 / Parent: none
 Receiver tier: haiku
+Repo: $d
 Card: .baton/PROJECT_CARD.md @ $cardhash
 Trust rule: This file is a summary. Anything tagged [S] is summary-derived —
 verify it against the repo before acting on it.

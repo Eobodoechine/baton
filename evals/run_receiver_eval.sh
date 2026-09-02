@@ -38,7 +38,7 @@ run_arm() {           # run_arm <arm> <trial> <prompt> <extra-grade-flag>
       --allowedTools Read Edit Write Bash Glob Grep \
       > "$OUT/${arm}_${trial}.jsonl" 2>"$OUT/${arm}_${trial}.err" )
 
-  "$PYBIN" "$HERE/grade_receiver.py" "$OUT/${arm}_${trial}.jsonl" "$dir" $flag \
+  "$PYBIN" "$HERE/grade_receiver.py" "$OUT/${arm}_${trial}.jsonl" "$dir" "$flag" \
       > "$OUT/${arm}_${trial}.verdict.json" 2>&1
   local rc=$?
   local sub

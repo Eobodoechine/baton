@@ -6,12 +6,19 @@ TRUE — that is what the receiver eval is for. Usage:
 
     lint_baton.py path/to/BATON.md [--tier brief|teaching]
 
-Exit 0 = conforms. Exit 1 = violations, printed one per line.
+Exit 0 = conforms. Exit 1 = spec violations. Exit 2 = input error.
+Exit 3 = internal error (no verdict reached).
 """
 import argparse
 import os
 import re
 import sys
+import traceback
+
+EXIT_OK = 0
+EXIT_VIOLATIONS = 1
+EXIT_INPUT_ERROR = 2
+EXIT_INTERNAL_ERROR = 3
 
 MANDATORY = [
     "## 1. DO THIS NOW",
@@ -22,7 +29,7 @@ MANDATORY = [
     "## 6. RULES THAT BIND THIS TASK",
     "## 11. DONE MEANS",
 ]
-PLACEHOLDER = re.compile(r"\{\{[A-Z_|a-z-]+\}\}|<fill in>|TODO:|TBD\b")
+PLACEHOLDER = re.compile(r"\{\{[\w|-]+\}\}|<fill in>|TODO\b|TBD\b")
 # Tiers are DETAIL budgets, not model classes. The old model-named values are kept as
 # aliases so existing batons keep linting, but a tier never selects a model -- the relay
 # inherits the configured one (scripts/baton_next.sh).
@@ -31,22 +38,82 @@ CANON = {"brief": "brief", "teaching": "teaching",
 CAPS = {"brief": 2500, "teaching": 5000}
 
 
+def strip_comments(body):
+    return re.sub(r"<!--.*?-->", "", body, flags=re.S)
+
+
+def headings(body):
+    """Return real markdown section headings and bodies, excluding fenced examples."""
+    lines = strip_comments(body).split("\n")
+    marks = []
+    fenced = False
+    for index, line in enumerate(lines):
+        if re.match(r"\s*(?:```|~~~)", line):
+            fenced = not fenced
+            continue
+        if not fenced and line.startswith("##"):
+            marks.append((index, line.strip()))
+    result = []
+    for pos, (index, heading) in enumerate(marks):
+        end = marks[pos + 1][0] if pos + 1 < len(marks) else len(lines)
+        result.append((heading, "\n".join(lines[index + 1:end])))
+    return result
+
+
+def heading_is(heading, required):
+    if not heading.startswith(required):
+        return False
+    rest = heading[len(required):]
+    return not rest or not rest[0].isalnum()
+
+
+def section_body(body, header):
+    for heading, text in headings(body):
+        if heading_is(heading, header):
+            return text
+    return None
+
+
 def section(body, header):
-    """Text between `header` and the next `## ` heading."""
-    i = body.find(header)
-    if i < 0:
-        return ""
-    j = body.find("\n## ", i + len(header))
-    return body[i:j if j > 0 else len(body)]
+    for heading, text in headings(body):
+        if heading_is(heading, header):
+            return heading + "\n" + text
+    return ""
 
 
-def check(path, tier):
+def header_region(body):
+    lines = strip_comments(body).split("\n")
+    keep = []
+    fenced = False
+    for line in lines:
+        if re.match(r"\s*(?:```|~~~)", line):
+            fenced = not fenced
+            continue
+        if not fenced and line.startswith("##"):
+            break
+        if not fenced:
+            keep.append(line)
+    return "\n".join(keep)
+
+
+def check(path, tier, repo_root=None):
     body = open(path, encoding="utf-8", errors="replace").read()
     bad = []
 
     for h in MANDATORY:
-        if h not in body:
+        rest = section_body(body, h)
+        if rest is None:
             bad.append("missing mandatory section: %s" % h)
+        elif not rest.strip():
+            bad.append("section is present but empty: %s — write content or 'none'"
+                       % h)
+
+    nums = [int(match.group(1)) for match in
+            (re.match(r"##\s*(\d+)\.", h) for h, _ in headings(body)) if match]
+    out_of_order = [b for a, b in zip(nums, nums[1:]) if b <= a]
+    if out_of_order:
+        bad.append("sections are out of order at section %s"
+                   % ", ".join(str(number) for number in out_of_order))
 
     for m in PLACEHOLDER.finditer(body):
         bad.append("unfilled placeholder: %s" % m.group(0))
@@ -83,10 +150,18 @@ def check(path, tier):
         if cmd not in tail:
             bad.append("section 11 does not repeat section 1's command verbatim")
 
-    if "Trust rule:" not in body:
+    head = header_region(body)
+    if "Trust rule:" not in head:
         bad.append("header is missing the Trust rule line")
-    if not re.search(r"^Card:.*@\s*[0-9a-f]{8}", body, re.M):
+    if not re.search(r"^Card:.*@\s*[0-9a-f]{8}", head, re.M):
         bad.append("header is missing a 'Card: <path> @ <hash8>' pin")
+    repo = re.search(r"^Repo:(.*)$", head, re.M)
+    if not repo:
+        bad.append("header is missing the 'Repo:' line")
+    elif not os.path.isabs(repo.group(1).strip()):
+        bad.append("header 'Repo:' line must name an absolute repository path")
+    elif repo_root and os.path.realpath(repo.group(1).strip()) != os.path.realpath(repo_root):
+        bad.append("header 'Repo:' does not match the repository being relayed")
 
     s5 = section(body, "## 5. USER'S WORDS")
     if '"' not in s5 and "none recorded" not in s5:
@@ -107,27 +182,42 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("baton")
     ap.add_argument("--tier", choices=sorted(CANON), default=None)
+    ap.add_argument("--repo-root", default=None)
     a = ap.parse_args()
 
     if not os.path.exists(a.baton):
-        print("no such baton: %s" % a.baton)
-        return 1
+        print("INPUT ERROR: no such baton: %s" % a.baton, file=sys.stderr)
+        return EXIT_INPUT_ERROR
+    if os.path.isdir(a.baton):
+        print("INPUT ERROR: not a file: %s" % a.baton, file=sys.stderr)
+        return EXIT_INPUT_ERROR
+    try:
+        head = open(a.baton, encoding="utf-8", errors="replace").read(2000)
+    except OSError as exc:
+        print("INPUT ERROR: cannot read %s: %s" % (a.baton, exc), file=sys.stderr)
+        return EXIT_INPUT_ERROR
 
     tier = a.tier
     if tier is None:
-        head = open(a.baton, encoding="utf-8", errors="replace").read(2000)
         # "Detail tier:" is current; "Receiver tier:" is the pre-rename header.
         m = re.search(r"^(?:Detail|Receiver) tier:\s*(\w+)", head, re.M)
         tier = m.group(1) if m and m.group(1) in CANON else "teaching"
 
     tier = CANON.get(tier, "teaching")
-    bad = check(a.baton, tier)
+    bad = check(a.baton, tier, repo_root=a.repo_root)
     for b in bad:
         print("FAIL: %s" % b)
     if not bad:
         print("OK: %s conforms (tier %s)" % (a.baton, tier))
-    return 1 if bad else 0
+    return EXIT_VIOLATIONS if bad else EXIT_OK
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        traceback.print_exc()
+        print("INTERNAL ERROR: lint_baton.py reached no verdict", file=sys.stderr)
+        sys.exit(EXIT_INTERNAL_ERROR)
